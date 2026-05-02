@@ -2,6 +2,34 @@ import { logger } from "../libs/log.js";
 import { downloadBlobFile } from "../libs/utils.js";
 import { buildBilingualVtt } from "./vtt.js";
 import { getSettingWithDefault } from "../libs/storage.js";
+import DomManager from "../libs/domManager.js";
+import { SubtitleControls, MASK_MODES } from "./SubtitleControls.js";
+
+const addMaskStyles = () => {
+  if (document.getElementById("kiss-subtitle-mask-styles")) return;
+  const style = document.createElement("style");
+  style.id = "kiss-subtitle-mask-styles";
+  style.textContent = `
+    .kiss-mask-translation .kiss-youtube-translation {
+      filter: blur(6px); cursor: pointer; user-select: none; transition: filter 0.2s;
+    }
+    .kiss-mask-translation .kiss-youtube-translation:hover { filter: none; }
+
+    .kiss-mask-all .kiss-youtube-original,
+    .kiss-mask-all .kiss-youtube-translation {
+      filter: blur(6px); cursor: pointer; user-select: none; transition: filter 0.2s;
+    }
+    .kiss-mask-all .kiss-youtube-original:hover,
+    .kiss-mask-all .kiss-youtube-translation:hover { filter: none; }
+  `;
+  document.head.appendChild(style);
+};
+
+const MASK_CLASS_MAP = {
+  [MASK_MODES.SHOW_ALL]: null,
+  [MASK_MODES.HIDE_TRANSLATION]: "kiss-mask-translation",
+  [MASK_MODES.HIDE_BOTH]: "kiss-mask-all",
+};
 
 /**
  * YouTube 字幕列表管理器
@@ -29,12 +57,15 @@ export class YouTubeSubtitleList {
     this.subtitleListEl = null; // 字幕列表面板
     this.vocabularyListEl = null; // 生词本面板
     this.subtitleScrollContainer = null; //
+    this.subActionBar = null; // 字幕操作栏
     this._cachedSubtitleItems = []; // 缓存字幕列表项 DOM，减少 querySelector 调用，提升滚动性能
 
     // --- 状态管理 ---
     this.loopAutoScroll = null; // 自动滚动的定时器 ID
     this.activeTab = "subtitles"; // 当前激活的 Tab: 'subtitles' 或 'vocabulary'
     this._lastActiveIndex = -1; // 上一次高亮的字幕索引
+    this.maskMode = MASK_MODES.SHOW_ALL; // 遮蔽模式
+    this.subtitleControlsManager = null; // 遮蔽控件 DomManager
 
     // --- 事件绑定 ---
     this.handleWordAdded = this.handleWordAdded.bind(this);
@@ -87,15 +118,49 @@ export class YouTubeSubtitleList {
   destroy() {
     this.turnOffAutoSub();
     document.removeEventListener("kiss-add-word", this.handleWordAdded);
+    if (this.subtitleControlsManager) {
+      this.subtitleControlsManager.destroy();
+      this.subtitleControlsManager = null;
+    }
     if (this.container) {
       this.container.remove();
       this.container = null;
     }
     this.subtitleListEl = null;
     this.vocabularyListEl = null;
+    this.subActionBar = null;
+    this.subtitleScrollContainer = null;
     this.bilingualSubtitles = [];
     this._cachedSubtitleItems = [];
     this.vocabulary = [];
+    this.maskMode = MASK_MODES.SHOW_ALL;
+  }
+
+  /**
+   * 设置字幕遮蔽模式
+   * @param {string} mode — MASK_MODES 中的一个值
+   */
+  setMaskMode(mode) {
+    if (!Object.values(MASK_MODES).includes(mode)) return;
+    if (this.maskMode === mode) return;
+
+    this.maskMode = mode;
+
+    if (this.subtitleScrollContainer) {
+      this.subtitleScrollContainer.classList.remove(
+        "kiss-mask-translation",
+        "kiss-mask-all"
+      );
+      const cls = MASK_CLASS_MAP[mode];
+      if (cls) this.subtitleScrollContainer.classList.add(cls);
+    }
+
+    if (this.subtitleControlsManager) {
+      this.subtitleControlsManager.updateProps({
+        mode: this.maskMode,
+        onModeChange: this.setMaskMode.bind(this),
+      });
+    }
   }
 
   // ==================================================================================
@@ -192,6 +257,8 @@ export class YouTubeSubtitleList {
    */
   createSubtitleList() {
     if (!this.videoEl) return;
+
+    addMaskStyles();
 
     // 1. 确保主容器存在
     this._ensureContainer();
@@ -371,8 +438,8 @@ export class YouTubeSubtitleList {
     this.subtitleListEl.style.cssText = `display: flex; flex-direction: column; height: 100%; overflow: hidden;`;
 
     //    1.1 Subtitle Action Bar (固定在顶部)
-    const subActionBar = document.createElement("div");
-    subActionBar.style.cssText = `padding: 10px 16px; border-bottom: 1px solid var(--kt-divider); display: flex; justify-content: center; flex-shrink: 0;`;
+    this.subActionBar = document.createElement("div");
+    this.subActionBar.style.cssText = `padding: 6px 12px; border-bottom: 1px solid var(--kt-divider); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;`;
 
     const downloadBtn = document.createElement("button");
     downloadBtn.textContent = "下载字幕 (VTT)";
@@ -398,8 +465,22 @@ export class YouTubeSubtitleList {
     });
     downloadBtn.addEventListener("click", this.downloadSubtitles.bind(this));
 
-    subActionBar.appendChild(downloadBtn);
-    this.subtitleListEl.appendChild(subActionBar);
+    this.subActionBar.appendChild(downloadBtn);
+
+    // Mount mask-mode toggle buttons (DomManager appends to the right of downloadBtn)
+    this.subtitleControlsManager = new DomManager({
+      id: "kiss-subtitle-controls",
+      className: "notranslate",
+      reactComponent: SubtitleControls,
+      rootElement: this.subActionBar,
+      props: {
+        mode: this.maskMode,
+        onModeChange: this.setMaskMode.bind(this),
+      },
+    });
+    this.subtitleControlsManager.show();
+
+    this.subtitleListEl.appendChild(this.subActionBar);
 
     //    1.2 Subtitle Scroll Container (【新增】专门的滚动容器)
     this.subtitleScrollContainer = document.createElement("div");

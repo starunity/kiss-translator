@@ -49,7 +49,7 @@ class YouTubeCaptionProvider {
   #subtitleListManager = null;
 
   constructor(setting = {}) {
-    this.#setting = { ...setting, showOrigin: false };
+    this.#setting = { ...setting, showOrigin: false, showVideoCaption: true };
     this.#i18n = newI18n(setting.uiLang || "zh");
   }
 
@@ -211,6 +211,8 @@ class YouTubeCaptionProvider {
       this.#reProcessEvents();
     } else if (name === "showOrigin") {
       this.#toggleShowOrigin();
+    } else if (name === "showVideoCaption") {
+      this.#managerInstance?.setVideoVisible(value);
     }
   }
 
@@ -244,7 +246,7 @@ class YouTubeCaptionProvider {
    * @private
    */
   #getMenuProps() {
-    const { transApis, segSlug, skipAd, isBilingual, showOrigin } =
+    const { transApis, segSlug, skipAd, isBilingual, showOrigin, showVideoCaption } =
       this.#setting;
     return {
       i18n: this.#i18n,
@@ -257,6 +259,7 @@ class YouTubeCaptionProvider {
         skipAd,
         isBilingual,
         showOrigin,
+        showVideoCaption,
       },
     };
   }

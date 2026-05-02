@@ -124,6 +124,7 @@ export class BilingualSubtitleManager {
   // #throttleSeconds = 30;
   #setting = {};
   #isAdPlaying = false;
+  #videoVisible = true;
   #throttledTriggerTranslations;
   #tooltipEl = null;
   #hoverTimeout = null; // 用于延迟显示/隐藏tooltip
@@ -716,7 +717,7 @@ export class BilingualSubtitleManager {
   #updateCaptionDisplay(subtitle) {
     if (!this.#paperEl || !this.#captionWindowEl) return;
 
-    if (this.#isAdPlaying) {
+    if (this.#isAdPlaying || !this.#videoVisible) {
       this.#paperEl.style.display = "none";
       return;
     }
@@ -856,6 +857,12 @@ export class BilingualSubtitleManager {
 
   updateSetting(obj) {
     this.#setting = { ...this.#setting, ...obj };
+  }
+
+  setVideoVisible(visible) {
+    this.#videoVisible = visible;
+    this.#currentSubtitleIndex = -1;
+    this.onTimeUpdate();
   }
 
   // 获取当前字幕的开始时间（使用重新分段后的时间）
