@@ -1,3 +1,8 @@
+/**
+ * @file i18n.js
+ * @description 国际化本地化字典文件，包含支持的界面语言、自定义 API 请求帮助文档，以及多语言文案对照（支持中文、英文、繁体中文、日文、韩文）。
+ */
+
 export const UI_LANGS = [
   ["en", "English"],
   ["zh", "简体中文"],
@@ -180,6 +185,73 @@ async ({ res, ...args }) => {
   return { translations, modelMsg };
 }`;
 
+const customApiHelpTW = `// 請求資料預設格式
+{
+  "url": "{{url}}",
+  "method": "POST",
+  "headers": {
+    "Content-type": "application/json",
+    "Authorization": "Bearer {{key}}"
+  },
+  "body": {
+    "text": "{{text}}", // 待翻譯文字
+    "from": "{{from}}", // 文字的語言（可能為空）
+    "to": "{{to}}",     // 目標語言
+  },
+}
+
+
+// 回傳資料預設格式
+{
+  text: "", // 翻譯後的文字
+  from: "", // 辨識的來源語言
+  to: "",   // 目標語言（選填）
+}
+
+
+// Hook 範例
+// URL
+https://translate.googleapis.com/translate_a/single?client=gtx&dj=1&dt=t&ie=UTF-8&q={{text}}&sl=en&tl=zh-CN
+
+// Request Hook
+(text, from, to, url, key) => [url, {
+  headers: {
+      "Content-type": "application/json",
+  },
+  method: "GET",
+  body: null,
+}]
+
+// Response Hook
+// 其中回傳陣列第一個值表示譯文字串，第二個值為布林值，表示原文語言與目標語言是否相同
+(res, text, from, to) => [res.sentences.map((item) => item.trans).join(" "), to === res.src]
+
+
+// 支援的語言代碼如下
+${customApiLangs}
+`;
+
+const requestHookHelperTW = `1、第一個參數包含如下欄位：'texts', 'from', 'to', 'url', 'key', 'model', 'systemPrompt', ...
+2、回傳值必須是包含以下欄位的物件： 'url', 'body', 'headers', 'method'
+3、若回傳空值，則 hook 函式不會產生任何效果。
+
+// 範例
+async (args, { url, body, headers, userMsg, method } = {}) => {
+  return { url, body, headers, userMsg, method };
+}`;
+
+const responsetHookHelperTW = `1、第一個參數包含如下欄位：'res', ...
+2、回傳值必須是包含以下欄位的物件： 'translations'
+  （'translations' 應為一個二維陣列：[[譯文, 原文語言]]）
+3、若回傳空值，則 hook 函式不會產生任何效果。
+
+// 範例
+async ({ res, ...args }) => {
+  const translations = [["你好", "en"]];
+  const modelMsg = {}; // 用於 AI 上下文
+  return { translations, modelMsg };
+}`;
+
 export const I18N = {
   app_name: {
     zh: `简约翻译`,
@@ -198,21 +270,21 @@ export const I18N = {
   custom_api_help: {
     zh: customApiHelpZH,
     en: customApiHelpEN,
-    zh_TW: customApiHelpZH,
+    zh_TW: customApiHelpTW,
     ja: customApiHelpEN,
     ko: customApiHelpEN,
   },
   request_hook_helper: {
     zh: requestHookHelperZH,
     en: requestHookHelperEN,
-    zh_TW: requestHookHelperZH,
+    zh_TW: requestHookHelperTW,
     ja: requestHookHelperEN,
     ko: requestHookHelperEN,
   },
   response_hook_helper: {
     zh: responsetHookHelperZH,
     en: responsetHookHelperEN,
-    zh_TW: responsetHookHelperZH,
+    zh_TW: responsetHookHelperTW,
     ja: responsetHookHelperEN,
     ko: responsetHookHelperEN,
   },
@@ -243,6 +315,13 @@ export const I18N = {
     zh_TW: `API設定`,
     ja: `API設定`,
     ko: `API 설정`,
+  },
+  prompt_management: {
+    zh: `提示词管理`,
+    en: `Prompt Management`,
+    zh_TW: `提示詞管理`,
+    ja: `プロンプト管理`,
+    ko: `프롬프트 관리`,
   },
   sync_setting: {
     zh: `同步设置`,
@@ -289,7 +368,7 @@ export const I18N = {
   about_md_local: {
     zh: `请 [点击这里](${process.env.REACT_APP_HOMEPAGE}) 查看详情。`,
     en: `Please [click here](${process.env.REACT_APP_HOMEPAGE}) for details.`,
-    zh_TW: `請 [點這裡](${process.env.REACT_APP_HOMEPAGE}) 查看詳細內容。`,
+    zh_TW: `請 [點這裡](${process.env.REACT_APP_HOMEPAGE}) 檢視詳細內容。`,
     ja: `詳細は [こちら](${process.env.REACT_APP_HOMEPAGE}) をクリックしてください。`,
     ko: `자세한 내용은 [여기](${process.env.REACT_APP_HOMEPAGE})를 클릭하세요.`,
   },
@@ -335,6 +414,55 @@ export const I18N = {
     ja: `以下のモデルの<think>出力を無視する (コンマ(,)区切り)。モデルが思考をサポートしているが、ollamaがサポートしていない場合に記入が必要です`,
     ko: `다음 모델의 <think> 블록 무시 (쉼표(,)로 구분), 모델이 사고를 지원하지만 ollama가 지원하지 않는 경우 이 매개변수를 입력해야 합니다`,
   },
+  thinking_mode: {
+    zh: `思考模式`,
+    en: `Thinking Mode`,
+    zh_TW: `思考模式`,
+    ja: `思考モード`,
+    ko: `사고 모드`,
+  },
+  thinking_mode_default: {
+    zh: `接口默认`,
+    en: `API Default`,
+    zh_TW: `介面預設`,
+    ja: `APIデフォルト`,
+    ko: `API 기본값`,
+  },
+  thinking_mode_enabled: {
+    zh: `开启思考`,
+    en: `Enable Thinking`,
+    zh_TW: `開啟思考`,
+    ja: `思考を有効`,
+    ko: `사고 활성화`,
+  },
+  thinking_mode_disabled: {
+    zh: `关闭思考`,
+    en: `Disable Thinking`,
+    zh_TW: `關閉思考`,
+    ja: `思考を無効`,
+    ko: `사고 비활성화`,
+  },
+  thinking_mode_helper: {
+    zh: `目前各家接口混乱，如果出现异常，请使用接口默认选项`,
+    en: `The thinking parameters vary across APIs. If you encounter errors, please use the "API Default" option.`,
+    zh_TW: `目前各家介面混亂，如果出現異常，請使用介面預設選項`,
+    ja: `各APIの思考パラメータは統一されていません。エラーが発生した場合は「APIデフォルト」を使用してください。`,
+    ko: `API별 사고 매개변수가 통일되어 있지 않습니다. 오류 발생 시 "API 기본값"을 사용하세요.`,
+  },
+  thinking_effort: {
+    zh: `思考强度`,
+    en: `Thinking Effort`,
+    zh_TW: `思考強度`,
+    ja: `思考レベル`,
+    ko: `사고 수준`,
+  },
+  thinking_effort_default: {
+    zh: `接口默认`,
+    en: `API Default`,
+    zh_TW: `介面預設`,
+    ja: `APIデフォルト`,
+    ko: `API 기본값`,
+  },
   fetch_interval: {
     zh: `每次请求间隔时间 (0-5000ms)`,
     en: `Time Between Requests (0-5000ms)`,
@@ -350,11 +478,11 @@ export const I18N = {
     ko: `번역 간격 (1-2000ms)`,
   },
   http_timeout: {
-    zh: `请求超时时间 (100-600000ms)`,
-    en: `Request Timeout Time (100-600000ms)`,
-    zh_TW: `請求逾時時間 (100-60000ms)`,
-    ja: `リクエストタイムアウト (100-600000ms)`,
-    ko: `요청 시간 초과 (100-600000ms)`,
+    zh: `请求超时时间 (1-600s)`,
+    en: `Request Timeout Time (1-600s)`,
+    zh_TW: `請求逾時時間 (1-600s)`,
+    ja: `リクエストタイムアウト (1-600s)`,
+    ko: `요청 시간 초과 (1-600s)`,
   },
   custom_header: {
     zh: `自定义Header参数`,
@@ -422,7 +550,7 @@ export const I18N = {
   single_word_no_trans: {
     zh: `单个单词划词不调用翻译服务`,
     en: `Do not use translation services for single word`,
-    zh_TW: `單個單詞劃詞不調用翻譯服務`,
+    zh_TW: `選取單一單字時不呼叫翻譯服務`,
     ja: `単一単語は翻訳サービスを使用しない`,
     ko: `단일 단어는 번역 서비스를 사용하지 않음`,
   },
@@ -499,7 +627,7 @@ export const I18N = {
   to_lang2_helper: {
     zh: `设定后，与目标语言产生互译效果，但依赖远程语言识别。`,
     en: `After setting, it will produce mutual translation effect with the target language, but it relies on remote language recognition.`,
-    zh_TW: `設定後會與目標語言互譯，但依賴遠端語言識別。`,
+    zh_TW: `設定後會與目標語言互譯，但依賴遠端語言偵測。`,
     ja: `設定後、ターゲット言語との相互翻訳が可能になりますが、リモート言語認識に依存します。`,
     ko: `설정 후, 대상 언어와 상호 번역 효과가 발생하지만, 원격 언어 인식에 의존합니다.`,
   },
@@ -594,12 +722,201 @@ export const I18N = {
     ja: `追加`,
     ko: `추가`,
   },
+  bulk_actions: {
+    zh: `批量操作`,
+    en: `Bulk Actions`,
+    zh_TW: `批次操作`,
+    ja: `一括操作`,
+    ko: `일괄 작업`,
+  },
+  select_all: {
+    zh: `全选`,
+    en: `Select All`,
+    zh_TW: `全選`,
+    ja: `すべて選択`,
+    ko: `모두 선택`,
+  },
+  deselect_all: {
+    zh: `全不选`,
+    en: `Deselect All`,
+    zh_TW: `全部取消選取`,
+    ja: `すべて解除`,
+    ko: `모두 해제`,
+  },
+  pin_to_top: {
+    zh: `置顶`,
+    en: `Pin to Top`,
+    zh_TW: `置頂`,
+    ja: `先頭に固定`,
+    ko: `맨 위에 고정`,
+  },
+  delete_selected_apis_confirm: {
+    zh: `确定删除已选的 {count} 个接口吗？`,
+    en: `Delete {count} selected interfaces?`,
+    zh_TW: `確定刪除已選的 {count} 個介面嗎？`,
+    ja: `選択した {count} 件のインターフェースを削除しますか？`,
+    ko: `선택한 인터페이스 {count}개를 삭제할까요?`,
+  },
   copy_api: {
     zh: `复制接口`,
     en: `Copy Interface`,
     zh_TW: `複製介面`,
     ja: `インターフェースをコピー`,
     ko: `인터페이스 복사`,
+  },
+  prompt_name: {
+    zh: `名称`,
+    en: `Name`,
+    zh_TW: `名稱`,
+    ja: `名前`,
+    ko: `이름`,
+  },
+  system_prompt: {
+    zh: `系统提示词`,
+    en: `System Prompt`,
+    zh_TW: `系統提示詞`,
+    ja: `システムプロンプト`,
+    ko: `시스템 프롬프트`,
+  },
+  user_prompt: {
+    zh: `用户提示词`,
+    en: `User Prompt`,
+    zh_TW: `使用者提示詞`,
+    ja: `ユーザープロンプト`,
+    ko: `사용자 프롬프트`,
+  },
+  copy_as_template: {
+    zh: `复制为模板`,
+    en: `Copy as Template`,
+    zh_TW: `複製為範本`,
+    ja: `テンプレートとしてコピー`,
+    ko: `템플릿으로 복사`,
+  },
+  delete_prompt_confirm: {
+    zh: `确定删除这份提示词吗？`,
+    en: `Delete this prompt?`,
+    zh_TW: `確定刪除這份提示詞嗎？`,
+    ja: `このプロンプトを削除しますか？`,
+    ko: `이 프롬프트를 삭제할까요?`,
+  },
+  custom_prompt: {
+    zh: `自定义提示词`,
+    en: `Custom Prompt`,
+    zh_TW: `自訂提示詞`,
+    ja: `カスタムプロンプト`,
+    ko: `사용자 프롬프트`,
+  },
+  add_prompt: {
+    zh: `新增提示词`,
+    en: `Add Prompt`,
+    zh_TW: `新增提示詞`,
+    ja: `プロンプトを追加`,
+    ko: `프롬프트 추가`,
+  },
+  prompt_category_batch_system: {
+    zh: `聚合系统提示词`,
+    en: `Batch System Prompt`,
+    zh_TW: `聚合系統提示詞`,
+    ja: `一括翻訳システムプロンプト`,
+    ko: `일괄 시스템 프롬프트`,
+  },
+  prompt_category_user: {
+    zh: `用户提示词`,
+    en: `User Prompt`,
+    zh_TW: `使用者提示詞`,
+    ja: `ユーザープロンプト`,
+    ko: `사용자 프롬프트`,
+  },
+  prompt_category_subtitle: {
+    zh: `字幕提示词`,
+    en: `Subtitle Prompt`,
+    zh_TW: `字幕提示詞`,
+    ja: `字幕プロンプト`,
+    ko: `자막 프롬프트`,
+  },
+  prompt_category_dictionary: {
+    zh: `词典提示词`,
+    en: `Dictionary Prompt`,
+    zh_TW: `詞典提示詞`,
+    ja: `辞書プロンプト`,
+    ko: `사전 프롬프트`,
+  },
+  batch_prompt: {
+    zh: `聚合翻译提示词`,
+    en: `Batch Translation Prompt`,
+    zh_TW: `聚合翻譯提示詞`,
+    ja: `一括翻訳プロンプト`,
+    ko: `일괄 번역 프롬프트`,
+  },
+  nobatch_prompt: {
+    zh: `非聚合翻译提示词`,
+    en: `Non-batch Translation Prompt`,
+    zh_TW: `非聚合翻譯提示詞`,
+    ja: `非一括翻訳プロンプト`,
+    ko: `비일괄 번역 프롬프트`,
+  },
+  subtitle_prompt: {
+    zh: `AI断句提示词`,
+    en: `AI Segmentation Prompt`,
+    zh_TW: `AI斷句提示詞`,
+    ja: `AI セグメンテーションプロンプト`,
+    ko: `AI 문장 분할 프롬프트`,
+  },
+  seg_prompt_mode: {
+    zh: `AI断句提示词`,
+    en: `AI Segmentation Prompt`,
+    zh_TW: `AI斷句提示詞`,
+    ja: `AI セグメンテーションプロンプト`,
+    ko: `AI 문장 분할 프롬프트`,
+  },
+  follow_api_prompt: {
+    zh: `接口默认`,
+    en: `Interface Default`,
+    zh_TW: `介面預設`,
+    ja: `インターフェース既定`,
+    ko: `인터페이스 기본값`,
+  },
+  preset_prompt_nobatch_translation: {
+    zh: `非聚合翻译`,
+    en: `Non-batch Translation`,
+    zh_TW: `非聚合翻譯`,
+    ja: `非一括翻訳`,
+    ko: `비일괄 번역`,
+  },
+  preset_prompt_batch_translation_json: {
+    zh: `聚合翻译（JSON）`,
+    en: `Batch Translation (JSON)`,
+    zh_TW: `聚合翻譯（JSON）`,
+    ja: `一括翻訳（JSON）`,
+    ko: `일괄 번역(JSON)`,
+  },
+  preset_prompt_batch_translation_xml: {
+    zh: `聚合翻译（XML）`,
+    en: `Batch Translation (XML)`,
+    zh_TW: `聚合翻譯（XML）`,
+    ja: `一括翻訳（XML）`,
+    ko: `일괄 번역(XML)`,
+  },
+  preset_prompt_batch_translation_line: {
+    zh: `聚合翻译（LINE）`,
+    en: `Batch Translation (LINE)`,
+    zh_TW: `聚合翻譯（LINE）`,
+    ja: `一括翻訳（LINE）`,
+    ko: `일괄 번역(LINE)`,
+  },
+  preset_prompt_subtitle_segmentation: {
+    zh: `字幕 AI 断句`,
+    en: `Subtitle AI Segmentation`,
+    zh_TW: `字幕 AI 斷句`,
+    ja: `字幕 AI セグメンテーション`,
+    ko: `자막 AI 문장 분할`,
+  },
+  preset_prompt_dictionary_en_zh: {
+    zh: `AI 英汉词典`,
+    en: `AI English-Chinese Dictionary`,
+    zh_TW: `AI 英漢詞典`,
+    ja: `AI 英中辞書`,
+    ko: `AI 영중 사전`,
   },
   inject_rules: {
     zh: `注入订阅规则`,
@@ -639,7 +956,7 @@ export const I18N = {
   rules_warn_1: {
     zh: `1、规则生效的优先级依次为：个人规则 > 订阅规则 > 全局规则。"全局规则"相当于兜底规则。`,
     en: `1. The priority of rules is: personal rules > subscription rules > global rules. "Global rules" are like a fallback rule.`,
-    zh_TW: `1.規則生效的優先順序依序為：個人規則 > 訂閱規則 > 全域規則。 "全域規則"相當於兜底規則。`,
+    zh_TW: `1. 規則生效的優先順序依序為：個人規則 > 訂閱規則 > 全域規則。「全域規則」相當於備援規則。`,
     ja: `1. ルールの優先順位: 個人ルール > 購読ルール > グローバルルール。「グローバルルール」はフォールバックルールのようなものです。`,
     ko: `1. 규칙 우선순위: 개인 규칙 > 구독 규칙 > 전역 규칙. "전역 규칙"은 일종의 폴백(fallback) 규칙입니다.`,
   },
@@ -653,16 +970,23 @@ export const I18N = {
   rules_warn_3: {
     zh: `3、关于规则填写：输入框留空或下拉框选“*”表示采用全局规则。CSS选择器支持 + 号前缀表示在全局规则基础上追加，- 号表示剔除。`,
     en: `3. Regarding filling in the rules: Leave the input box blank or select "*" in the drop-down box to use global rule. CSS selectors support prefixes: "+" means add to the global rules, "-" means exclude.`,
-    zh_TW: `3. 規則填寫說明：輸入框留空或下拉選擇「*」表示使用全域規則。CSS 選擇器支援使用前綴：「+」表示在全域規則基礎上追加，「-」表示剔除。`,
+    zh_TW: `3. 規則填寫說明：輸入框留空或下拉選擇「*」表示使用全域規則。CSS 選擇器支援使用前綴：「+」表示在全域規則基礎上新增，「-」表示排除。`,
     ja: `3. ルールの記入について: 入力ボックスを空白にするか、ドロップダウンで「*」を選択すると、グローバルルールが使用されます。CSS セレクターはプレフィックスに対応しています。「+」はグローバルルールへの追加、「-」は除外を意味します。`,
     ko: `3. 규칙 작성 관련: 입력란을 비워두거나 드롭다운에서 "*"를 선택하면 전역 규칙이 사용됩니다. CSS 선택자는 접두사를 지원합니다. "+"는 전역 규칙에 추가, "-"는 제외를 의미합니다.`,
   },
   sync_warn: {
     zh: `涉及隐私数据的同步请谨慎选择第三方同步服务，建议自行搭建 kiss-worker 或 WebDAV 服务。`,
     en: `When synchronizing data that involves privacy, please be cautious about choosing third-party sync services. It is recommended to set up your own sync service using kiss-worker or WebDAV.`,
-    zh_TW: `同步涉及隱私資料時，請謹慎選擇第三方同步服務；建議自建 kiss-worker 或 WebDAV 服務。`,
+    zh_TW: `同步涉及隱私資料時，請謹慎選擇第三方同步服務；建議自行架設 kiss-worker 或 WebDAV 服務。`,
     ja: `プライバシーに関わるデータを同期する場合、サードパーティの同期サービスは慎重に選択してください。kiss-worker や WebDAV サービスを自己ホスティングすることをお勧めします。`,
     ko: `개인정보가 포함된 데이터를 동기화할 경우, 타사 동기화 서비스 선택에 신중을 기하십시오. 자체 kiss-worker 또는 WebDAV 서비스를 구축하는 것을 권장합니다.`,
+  },
+  sync_warn_gist: {
+    zh: `GitHub Gist 不会出现在公开搜索或发现页面中，但任何拥有该链接的人都可以查看内容。`,
+    en: `GitHub Gists do not appear in public searches or discovery pages, but anyone with the link can view the content.`,
+    zh_TW: `GitHub Gist 不會出現在公開搜尋或探索頁面中，但任何擁有該連結的人都可以查看內容。`,
+    ja: `GitHub Gist は公開検索や発見ページには表示されませんが、リンクを持っている人は誰でも内容を閲覧できます。`,
+    ko: `GitHub Gist는 공개 검색이나 탐색 페이지에 표시되지 않지만, 링크를 가진 사람은 누구나 내용을 볼 수 있습니다.`,
   },
   sync_warn_2: {
     zh: `如果服务器存在其他客户端同步的数据，第一次同步将直接覆盖本地配置，后面则根据修改时间，新的覆盖旧的。`,
@@ -671,10 +995,17 @@ export const I18N = {
     ja: `サーバーに他のクライアントによって同期されたデータがある場合、最初の同期はローカル設定を直接上書きし、その後は変更時間に応じて新しいものが古いものを上書きします。`,
     ko: `서버에 다른 클라이언트가 동기화한 데이터가 있는 경우, 첫 번째 동기화는 로컬 구성을 직접 덮어쓰며, 이후에는 수정 시간에 따라 새 항목이 기존 항목을 덮어씁니다.`,
   },
+  sync_warn_encryption: {
+    zh: `新版本会自动将旧版明文同步数据迁移为加密数据；同步加密口令独立用于数据解密，请妥善保存，遗失后无法读取已加密的云端数据。`,
+    en: `New versions automatically migrate legacy plaintext sync data to encrypted data. The sync encryption passphrase is used independently for data decryption, so keep it safe; encrypted cloud data cannot be read if it is lost.`,
+    zh_TW: `新版本會自動將舊版明文同步資料遷移為加密資料；同步加密密碼獨立用於資料解密，請妥善保存，遺失後將無法讀取已加密的雲端資料。`,
+    ja: `新しいバージョンでは、従来の平文同期データを暗号化データへ自動移行します。同期暗号化パスフレーズはデータ復号専用に独立して使用されるため、安全に保管してください。紛失すると暗号化済みのクラウドデータは読み取れません。`,
+    ko: `새 버전은 기존 일반 텍스트 동기화 데이터를 암호화 데이터로 자동 마이그레이션합니다. 동기화 암호화 암호문은 데이터 복호화에 독립적으로 사용되므로 안전하게 보관하세요. 분실하면 암호화된 클라우드 데이터를 읽을 수 없습니다.`,
+  },
   about_sync_api: {
     zh: `自建kiss-wroker数据同步服务`,
     en: `Self-hosting a Kiss-worker data sync service`,
-    zh_TW: `自建 kiss-wroker 資料同步服務`,
+    zh_TW: `自行架設 kiss-worker 資料同步服務`,
     ja: `Kiss-worker データ同期サービスをセルフホストする`,
     ko: `Kiss-worker 데이터 동기화 서비스 자체 호스팅`,
   },
@@ -688,7 +1019,7 @@ export const I18N = {
   about_api_2: {
     zh: `2、大部分AI接口都与OpenAI兼容，因此选择OpenAI类型即可。“是否聚合发送翻译请求”所对应的 Prompt 并不相同，并且不是所有接口都支持聚合翻译。`,
     en: `2. Most AI interfaces are compatible with OpenAI, so you can simply select the OpenAI type. The prompts corresponding to “Whether to aggregate translation requests” are different, and not all interfaces support aggregated translation.`,
-    zh_TW: `2. 大部分的 AI 介面都與 OpenAI 相容，因此選擇 OpenAI 類型即可。「是否聚合發送翻譯請求」所對應的 Prompt 並不相同，並且不是所有介面都支援聚合翻譯。`,
+    zh_TW: `2. 大部分的 AI 介面都與 OpenAI 相容，因此選擇 OpenAI 類型即可。「是否彙整發送翻譯請求」所對應的 Prompt 並不相同，並且不是所有介面都支援彙整翻譯。`,
     ja: `2. ほとんどの AI インターフェースは OpenAI と互換性があるため、OpenAI タイプを選択すれば問題ありません。「翻訳リクエストをまとめて送信するかどうか」に対応するプロンプトは異なり、すべてのインターフェースが集約翻訳をサポートしているわけではありません。`,
     ko: `2. 대부분의 AI 인터페이스는 OpenAI와 호환되므로 OpenAI 유형을 선택하면 됩니다. “번역 요청을 집합적으로 보낼지 여부”에 대응하는 프롬프트는 서로 다르며, 모든 인터페이스가 집합 번역을 지원하는 것은 아닙니다.`,
   },
@@ -702,14 +1033,14 @@ export const I18N = {
   about_api_proxy: {
     zh: `查看自建一个翻译接口代理`,
     en: `Check out the self-built translation interface proxy`,
-    zh_TW: `查看如何自建翻譯介面 Proxy`,
+    zh_TW: `檢視如何自行架設翻譯介面 Proxy`,
     ja: `自作の翻訳インターフェースプロキシをチェックする`,
     ko: `자체 구축 번역 인터페이스 프록시 확인하기`,
   },
   setting_helper: {
     zh: `新旧配置并不兼容，导出的旧版配置，勿再次导入。`,
     en: `The old and new configurations are not compatible. Do not import the exported old configuration again.`,
-    zh_TW: `新舊配置並不相容，匯出的舊版配置，勿再次匯入。`,
+    zh_TW: `新舊設定並不相容，匯出的舊版設定請勿再次匯入。`,
     ja: `新旧の設定に互換性はありません。エクスポートした古い設定を再度インポートしないでください。`,
     ko: `이전 구성과 새 구성은 호환되지 않습니다. 내보낸 이전 구성을 다시 가져오지 마십시오.`,
   },
@@ -916,6 +1247,20 @@ export const I18N = {
     ja: `1. 対象要素の下にある、そのまま保持する必要がある子ノード。 2. CSSセレクタ構文に従ってください。`,
     ko: `1. 대상 요소 아래의 자식 노드 중 그대로 유지해야 하는 노드. 2. CSS 선택자 구문을 따릅니다.`,
   },
+  block_selector: {
+    zh: `块级元素选择器`,
+    en: `Block element selector`,
+    zh_TW: `區塊元素選擇器`,
+    ja: `ブロック要素セレクタ`,
+    ko: `블록 요소 선택자`,
+  },
+  block_selector_helper: {
+    zh: `1、匹配到的元素会被当作块级节点处理。2、遵循CSS选择器语法。`,
+    en: `1. Matched elements will be treated as block nodes. 2. Follow the CSS selector syntax.`,
+    zh_TW: `1. 符合的元素會被當作區塊節點處理。2. 遵循 CSS 選擇器語法。`,
+    ja: `1. 一致した要素はブロックノードとして扱われます。2. CSSセレクタ構文に従ってください。`,
+    ko: `1. 일치하는 요소는 블록 노드로 처리됩니다. 2. CSS 선택자 구문을 따르세요.`,
+  },
   root_selector: {
     zh: `根节点选择器`,
     en: `Root node selector`,
@@ -954,7 +1299,7 @@ export const I18N = {
   terms_helper: {
     zh: `1、支持正则表达式匹配，无需斜杆，不支持修饰符。2、多条术语用换行或分号“;”隔开。3、术语和译文用英文逗号“,”隔开。4、没有译文视为不翻译术语。`,
     en: `1. Supports regular expression matching, no slash required, and no modifiers are supported. 2. Separate multiple terms with newlines or semicolons ";". 3. Terms and translations are separated by English commas ",". 4. If there is no translation, the term will be deemed not to be translated.`,
-    zh_TW: `1. 支援正則表達式比對，無需斜線，且不支援修飾符。2. 多條術語以換行或分號「;」分隔。3. 術語與譯文以英文逗號「,」分隔。4. 無譯文者視為不翻譯該術語。`,
+    zh_TW: `1. 支援正規表示式比對，不需斜線，且不支援修飾符。2. 多條術語以換行或分號「;」分隔。3. 術語與譯文以英文逗號「,」分隔。4. 無譯文者視為不翻譯該術語。`,
     ja: `1. 正規表現マッチングをサポート (スラッシュ不要、修飾子非対応)。 2. 複数の用語は改行またはセミコロン「;」で区切ります。 3. 用語と翻訳は英語のコンマ「,」で区切ります。 4. 翻訳がない場合は、その用語を翻訳しないものとみなします。`,
     ko: `1. 정규식 일치를 지원하며, 슬래시가 필요 없고 수정자는 지원되지 않습니다. 2. 여러 용어는 줄바꿈 또는 세미콜론 ";"으로 구분합니다. 3. 용어와 번역은 영어 쉼표 ","로 구분합니다. 4. 번역이 없는 경우 해당 용어를 번역하지 않는 것으로 간주합니다.`,
   },
@@ -968,7 +1313,7 @@ export const I18N = {
   ai_terms_helper: {
     zh: `1、AI智能替换，不支持正则表达式。2、多条术语用换行或分号“;”隔开。3、术语和译文用英文逗号“,”隔开。4、没有译文视为不翻译术语。`,
     en: `1. AI intelligent replacement does not support regular expressions.2. Separate multiple terms with newlines or semicolons ";". 3. Terms and translations are separated by English commas ",". 4. If there is no translation, the term will be deemed not to be translated.`,
-    zh_TW: `1.AI智能替換，不支援正規表示式。2. 多條術語以換行或分號「;」分隔。3. 術語與譯文以英文逗號「,」分隔。4. 無譯文者視為不翻譯該術語。`,
+    zh_TW: `1. AI 智慧替換，不支援正規表示式。2. 多條術語以換行或分號「;」分隔。3. 術語與譯文以英文逗號「,」分隔。4. 無譯文者視為不翻譯該術語。`,
     ja: `1. AIによるインテリジェントな置換 (正規表現非対応)。 2. 複数の用語は改行またはセミコロン「;」で区切ります。 3. 用語と翻訳は英語のコンマ「,」で区切ります。 4. 翻訳がない場合は、その用語を翻訳しないものとみなします。`,
     ko: `1. AI 지능형 대체, 정규식을 지원하지 않습니다. 2. 여러 용어는 줄바꿈 또는 세미콜론 ";"으로 구분합니다. 3. 용어와 번역은 영어 쉼표 ","로 구분합니다. 4. 번역이 없는 경우 해당 용어를 번역하지 않는 것으로 간주합니다.`,
   },
@@ -996,7 +1341,7 @@ export const I18N = {
   highlight_style: {
     zh: `词汇高亮样式`,
     en: `Fav Words highlight style`,
-    zh_TW: `詞彙高亮樣式`,
+    zh_TW: `詞彙醒目標示樣式`,
     ja: `単語ハイライトスタイル`,
     ko: `단어 하이라이트 스타일`,
   },
@@ -1047,7 +1392,7 @@ export const I18N = {
       docInfo,
       glossary,
     }`,
-    zh_TW: `預先載入時注入，一個頁面僅運行一次。內建全域物件 KT: {
+    zh_TW: `預先載入時注入，一個頁面僅執行一次。內建全域物件 KT: {
       apiTranslate,
       apiDectect,
       apiSetting,
@@ -1085,7 +1430,7 @@ export const I18N = {
   inject_css_helper: {
     zh: `预加载时注入，一个页面仅运行一次。`,
     en: `Injected during preload, runs only once per page.`,
-    zh_TW: `預先載入時注入，一個頁面僅運行一次。`,
+    zh_TW: `預先載入時注入，一個頁面僅執行一次。`,
     ja: `プリロード時に注入され、ページごとに1回だけ実行されます。`,
     ko: `미리 로드 시 주입되며 페이지당 한 번만 실행됩니다.`,
   },
@@ -1229,6 +1574,13 @@ export const I18N = {
     ja: `データ同期API`,
     ko: `데이터 동기화 API`,
   },
+  gist_sync_tip: {
+    zh: `选择 GitHub Gist 时会自动创建私密 Gist。GitHub PAT 需要 Gists 读写权限。`,
+    en: `A secret gist will be created automatically when GitHub Gist is selected. GitHub PAT needs Gists read and write permission.`,
+    zh_TW: `選擇 GitHub Gist 時會自動建立私密 Gist。GitHub PAT 需要 Gists 讀寫權限。`,
+    ja: `GitHub Gist を選択すると Secret Gist が自動作成されます。GitHub PAT には Gists の読み書き権限が必要です。`,
+    ko: `GitHub Gist를 선택하면 비공개 Gist가 자동으로 생성됩니다. GitHub PAT에는 Gists 읽기/쓰기 권한이 필요합니다.`,
+  },
   data_sync_user: {
     zh: `数据同步账户`,
     en: `Data Sync User`,
@@ -1242,6 +1594,83 @@ export const I18N = {
     zh_TW: `資料同步金鑰`,
     ja: `データ同期キー`,
     ko: `데이터 동기화 키`,
+  },
+  data_sync_encrypt_key: {
+    zh: `同步加密口令`,
+    en: `Sync Encryption Passphrase`,
+    zh_TW: `同步加密密碼`,
+    ja: `同期暗号化パスフレーズ`,
+    ko: `동기화 암호화 암호문`,
+  },
+  set_sync_encrypt_key: {
+    zh: `设定口令`,
+    en: `Set Passphrase`,
+    zh_TW: `設定密碼`,
+    ja: `パスフレーズを設定`,
+    ko: `암호문 설정`,
+  },
+  change_sync_encrypt_key: {
+    zh: `修改口令`,
+    en: `Change Passphrase`,
+    zh_TW: `修改密碼`,
+    ja: `パスフレーズを変更`,
+    ko: `암호문 변경`,
+  },
+  sync_encrypt_key_not_set: {
+    zh: `口令未设置，同步功能不可用。`,
+    en: `Passphrase is not set. Sync is unavailable.`,
+    zh_TW: `密碼未設定，同步功能無法使用。`,
+    ja: `パスフレーズが未設定のため、同期機能は使用できません。`,
+    ko: `암호문이 설정되지 않아 동기화 기능을 사용할 수 없습니다.`,
+  },
+  old_sync_encrypt_key: {
+    zh: `旧口令`,
+    en: `Old Passphrase`,
+    zh_TW: `舊密碼`,
+    ja: `旧パスフレーズ`,
+    ko: `기존 암호문`,
+  },
+  new_sync_encrypt_key: {
+    zh: `新口令`,
+    en: `New Passphrase`,
+    zh_TW: `新密碼`,
+    ja: `新しいパスフレーズ`,
+    ko: `새 암호문`,
+  },
+  confirm_sync_encrypt_key: {
+    zh: `确认口令`,
+    en: `Confirm Passphrase`,
+    zh_TW: `確認密碼`,
+    ja: `パスフレーズを確認`,
+    ko: `암호문 확인`,
+  },
+  sync_encrypt_key_too_short: {
+    zh: `口令长度至少 6 位。`,
+    en: `Passphrase must be at least 6 characters.`,
+    zh_TW: `密碼長度至少 6 位。`,
+    ja: `パスフレーズは 6 文字以上にしてください。`,
+    ko: `암호문은 최소 6자 이상이어야 합니다.`,
+  },
+  sync_encrypt_key_mismatch: {
+    zh: `两次输入的口令不一致。`,
+    en: `The two passphrases do not match.`,
+    zh_TW: `兩次輸入的密碼不一致。`,
+    ja: `入力した 2 つのパスフレーズが一致しません。`,
+    ko: `두 번 입력한 암호문이 일치하지 않습니다.`,
+  },
+  old_sync_encrypt_key_invalid: {
+    zh: `旧口令不正确。`,
+    en: `Old passphrase is incorrect.`,
+    zh_TW: `舊密碼不正確。`,
+    ja: `旧パスフレーズが正しくありません。`,
+    ko: `기존 암호문이 올바르지 않습니다.`,
+  },
+  sync_encrypt_key_change_failed: {
+    zh: `修改口令失败。请保留旧口令和新口令，检查网络后重试；如果曾有部分数据已用新口令写入云端，必要时请清空远端同步文件后重新同步。`,
+    en: `Failed to change the passphrase. Keep both the old and new passphrases, check your network, and retry. If some cloud data was already written with the new passphrase, clear the remote sync files and sync again if needed.`,
+    zh_TW: `修改密碼失敗。請保留舊密碼和新密碼，檢查網路後重試；如果已有部分資料用新密碼寫入雲端，必要時請清空遠端同步檔案後重新同步。`,
+    ja: `パスフレーズの変更に失敗しました。旧パスフレーズと新パスフレーズの両方を保管し、ネットワークを確認してから再試行してください。一部のクラウドデータが新しいパスフレーズで書き込まれている場合は、必要に応じてリモート同期ファイルを削除してから再同期してください。`,
+    ko: `암호문 변경에 실패했습니다. 기존 암호문과 새 암호문을 모두 보관하고 네트워크를 확인한 뒤 다시 시도하세요. 일부 클라우드 데이터가 이미 새 암호문으로 쓰인 경우 필요하면 원격 동기화 파일을 비운 뒤 다시 동기화하세요.`,
   },
   sync_now: {
     zh: `立即同步`,
@@ -1281,7 +1710,7 @@ export const I18N = {
   click_test: {
     zh: `点击测试`,
     en: `Click Test`,
-    zh_TW: `點擊測試`,
+    zh_TW: `點選測試`,
     ja: `クリックしてテスト`,
     ko: `클릭 테스트`,
   },
@@ -1365,49 +1794,56 @@ export const I18N = {
   shortcuts_setting: {
     zh: `快捷键设置`,
     en: `Shortcuts Setting`,
-    zh_TW: `快捷鍵設定`,
+    zh_TW: `快速鍵設定`,
     ja: `ショートカット設定`,
     ko: `단축키 설정`,
   },
   toggle_translate_shortcut: {
     zh: `"开启翻译"快捷键`,
     en: `"Toggle Translate" Shortcut`,
-    zh_TW: `「開啟翻譯」快捷鍵`,
+    zh_TW: `「開啟翻譯」快速鍵`,
     ja: `「翻訳切り替え」ショートカット`,
     ko: `"번역 켜기" 단축키`,
+  },
+  toggle_transonly_shortcut: {
+    zh: `"隐藏原文"快捷键`,
+    en: `"Hide Original" Shortcut`,
+    zh_TW: `「隱藏原文」快速鍵`,
+    ja: `「原文を隠す」ショートカット`,
+    ko: `"원문 숨기기" 단축키`,
   },
   toggle_style_shortcut: {
     zh: `"切换样式"快捷键`,
     en: `"Toggle Style" Shortcut`,
-    zh_TW: `「切換樣式」快捷鍵`,
+    zh_TW: `「切換樣式」快速鍵`,
     ja: `「スタイル切り替え」ショートカット`,
     ko: `"스타일 전환" 단축키`,
   },
   toggle_popup_shortcut: {
     zh: `"打开弹窗"快捷键`,
     en: `"Open Popup" Shortcut`,
-    zh_TW: `「開啟彈窗」快捷鍵`,
+    zh_TW: `「開啟彈出視窗」快速鍵`,
     ja: `「ポップアップを開く」ショートカット`,
     ko: `"팝업 열기" 단축키`,
   },
   open_setting_shortcut: {
     zh: `"打开设置"快捷键`,
     en: `"Open Setting" Shortcut`,
-    zh_TW: `「開啟設定」快捷鍵`,
+    zh_TW: `「開啟設定」快速鍵`,
     ja: `「設定を開く」ショートカット`,
     ko: `"설정 열기" 단축키`,
   },
   hide_fab_button: {
     zh: `隐藏悬浮按钮`,
     en: `Hide Fab Button`,
-    zh_TW: `隱藏懸浮按鈕`,
+    zh_TW: `隱藏浮動按鈕`,
     ja: `フローティングボタンを隠す`,
     ko: `플로팅 버튼 숨기기`,
   },
   fab_click_action: {
     zh: `单击悬浮按钮动作`,
     en: `Single Click Fab Action`,
-    zh_TW: `單擊懸浮按钮動作`,
+    zh_TW: `點選浮動按鈕動作`,
     ja: `フローティングボタンのクリック動作`,
     ko: `플로팅 버튼 클릭 동작`,
   },
@@ -1435,7 +1871,7 @@ export const I18N = {
   hide_click_away: {
     zh: `点击外部关闭弹窗`,
     en: `Click outside to close the pop-up window`,
-    zh_TW: `點擊外部關閉彈窗`,
+    zh_TW: `點選外部區域關閉彈出視窗`,
     ja: `外部クリックでポップアップを閉じる`,
     ko: `바깥쪽 클릭 시 팝업 닫기`,
   },
@@ -1463,7 +1899,7 @@ export const I18N = {
   save_rule: {
     zh: `保存本站规则`,
     en: `Save this site rule`,
-    zh_TW: `保存本站規則`,
+    zh_TW: `儲存本站規則`,
     ja: `このサイトのルールを保存`,
     ko: `이 사이트 규칙 저장`,
   },
@@ -1512,7 +1948,7 @@ export const I18N = {
   trigger_trans_shortcut: {
     zh: `触发翻译快捷键`,
     en: `Trigger Translation Shortcut Keys`,
-    zh_TW: `觸發翻譯快捷鍵`,
+    zh_TW: `觸發翻譯快速鍵`,
     ja: `翻訳ショートカットキー`,
     ko: `번역 실행 단축키`,
   },
@@ -1526,7 +1962,7 @@ export const I18N = {
   shortcut_press_count: {
     zh: `快捷键连击次数`,
     en: `Shortcut Press Number`,
-    zh_TW: `快捷鍵連擊次數`,
+    zh_TW: `快速鍵連按次數`,
     ja: `ショートカットの連続プレス回数`,
     ko: `단축키 연속 입력 횟수`,
   },
@@ -1568,7 +2004,7 @@ export const I18N = {
   detect_lang_service: {
     zh: `语言检测服务`,
     en: `Language detect service`,
-    zh_TW: `語言檢測服務`,
+    zh_TW: `語言偵測服務`,
     ja: `言語検出サービス`,
     ko: `언어 감지 서비스`,
   },
@@ -1589,21 +2025,21 @@ export const I18N = {
   selection_translate: {
     zh: `划词翻译`,
     en: `Selection Translation`,
-    zh_TW: `劃詞翻譯`,
+    zh_TW: `選取文字翻譯`,
     ja: `選択翻訳`,
     ko: `선택 번역`,
   },
   toggle_selection_translate: {
     zh: `启用划词翻译`,
     en: `Use Selection Translate`,
-    zh_TW: `啟用劃詞翻譯`,
+    zh_TW: `啟用選取文字翻譯`,
     ja: `選択翻訳を有効にする`,
     ko: `선택 번역 사용`,
   },
   trigger_tranbox_shortcut: {
     zh: `显示翻译框/翻译选中文字快捷键`,
     en: `Open Translate Popup/Translate Selected Shortcut`,
-    zh_TW: `顯示翻譯框／翻譯選中文字快捷鍵`,
+    zh_TW: `顯示翻譯框／翻譯選取文字快速鍵`,
     ja: `翻訳ポップアップ表示/選択翻訳ショートカット`,
     ko: `번역창 표시/선택 번역 단축키`,
   },
@@ -1733,6 +2169,20 @@ export const I18N = {
     ja: `ブラックリスト`,
     ko: `블랙리스트`,
   },
+  add_to_blacklist: {
+    zh: `加入黑名单`,
+    en: `Add to Blacklist`,
+    zh_TW: `加入黑名單`,
+    ja: `ブラックリストに追加`,
+    ko: `블랙리스트에 추가`,
+  },
+  remove_from_blacklist: {
+    zh: `移出黑名单`,
+    en: `Remove from Blacklist`,
+    zh_TW: `移出黑名單`,
+    ja: `ブラックリストから削除`,
+    ko: `블랙리스트에서 제거`,
+  },
   disabled_orilist: {
     zh: `禁用Origin名单`,
     en: `Disabled Origin List`,
@@ -1824,6 +2274,41 @@ export const I18N = {
     ja: `完全な実装ではなく、一部のページでスタイルの問題が発生する可能性があります。`,
     ko: `완벽한 구현이 아니며 일부 페이지에서 스타일 문제가 발생할 수 있습니다.`,
   },
+  trans_order: {
+    zh: `文本顺序`,
+    en: `Translation Order`,
+    zh_TW: `文字順序`,
+    ja: `テキスト順序`,
+    ko: `텍스트 순서`,
+  },
+  original_first: {
+    zh: `原文在上方`,
+    en: `Original First`,
+    zh_TW: `原文在上方`,
+    ja: `原文が最初`,
+    ko: `원문이 먼저`,
+  },
+  translation_first: {
+    zh: `译文在上方`,
+    en: `Translation First`,
+    zh_TW: `譯文在上方`,
+    ja: `翻訳が最初`,
+    ko: `번역이 먼저`,
+  },
+  transonly_revert: {
+    zh: `悬浮显示原文`,
+    en: `Hover to Show Original`,
+    zh_TW: `滑鼠懸停時顯示原文`,
+    ja: `ホバーで原文を表示`,
+    ko: `호버 시 원문 표시`,
+  },
+  transonly_revert_delay: {
+    zh: `悬浮延迟(秒)`,
+    en: `Hover Delay (seconds)`,
+    zh_TW: `滑鼠懸停延遲(秒)`,
+    ja: `ホバー遅延(秒)`,
+    ko: `호버 지연(초)`,
+  },
   translate_page_title: {
     zh: `是否翻译页面标题`,
     en: `Translate Page Title`,
@@ -1862,7 +2347,7 @@ export const I18N = {
   trigger_click: {
     zh: `点击触发`,
     en: `Click Trigger`,
-    zh_TW: `點擊觸發`,
+    zh_TW: `點選觸發`,
     ja: `クリックトリガー`,
     ko: `클릭 트리거`,
   },
@@ -1879,6 +2364,27 @@ export const I18N = {
     zh_TW: `選取觸發`,
     ja: `選択トリガー`,
     ko: `선택 트리거`,
+  },
+  tranbtn_position_mode: {
+    zh: `弹出按钮位置`,
+    en: `Popup Button Position`,
+    zh_TW: `彈出按鈕位置`,
+    ja: `ポップアップボタン位置`,
+    ko: `팝업 버튼 위치`,
+  },
+  tranbtn_position_fixed: {
+    zh: `固定位置`,
+    en: `Fixed Position`,
+    zh_TW: `固定位置`,
+    ja: `固定位置`,
+    ko: `고정 위치`,
+  },
+  tranbtn_position_mouse: {
+    zh: `跟随鼠标`,
+    en: `Follow Mouse`,
+    zh_TW: `跟隨滑鼠`,
+    ja: `マウスに追従`,
+    ko: `마우스 따라가기`,
   },
   extend_styles: {
     zh: `附加样式`,
@@ -1911,7 +2417,7 @@ export const I18N = {
   open_menu: {
     zh: `打开弹窗菜单`,
     en: `Open Popup Menu`,
-    zh_TW: `開啟彈窗選單`,
+    zh_TW: `開啟彈出視窗選單`,
     ja: `ポップアップメニューを開く`,
     ko: `팝업 메뉴 열기`,
   },
@@ -1956,7 +2462,7 @@ export const I18N = {
       apiSetting,
       docInfo,
       glossary,}`,
-    zh_TW: `翻譯前時運行，入參為： {text,
+    zh_TW: `翻譯前執行，輸入參數為： {text,
       fromLang,
       toLang,
       apiSetting,
@@ -1985,7 +2491,7 @@ export const I18N = {
   translate_end_hook_helper: {
     zh: `翻译完成时运行，入参为： ({hostNode, parentNode, nodes, wrapperNode, innerNode})`,
     en: `Run when translation is complete, input parameters are: ({hostNode, parentNode, nodes, wrapperNode, innerNode})`,
-    zh_TW: `翻譯完成時運行，入參為： ({hostNode, parentNode, nodes, wrapperNode, innerNode})`,
+    zh_TW: `翻譯完成時執行，輸入參數為： ({hostNode, parentNode, nodes, wrapperNode, innerNode})`,
     ja: `翻訳完了時に実行、入力パラメータ: ({hostNode, parentNode, nodes, wrapperNode, innerNode})`,
     ko: `번역 완료 시 실행, 입력 매개변수: ({hostNode, parentNode, nodes, wrapperNode, innerNode})`,
   },
@@ -1999,7 +2505,7 @@ export const I18N = {
   translate_remove_hook_helper: {
     zh: `翻译移除时运行，入参为： 翻译节点。`,
     en: `Run when translation is removed, the input parameters are: translation node.`,
-    zh_TW: `移除翻譯時執行，入參為：翻譯節點。`,
+    zh_TW: `移除翻譯時執行，輸入參數為：翻譯節點。`,
     ja: `翻訳削除時に実行、入力パラメータ: 翻訳ノード。`,
     ko: `번역 제거 시 실행, 입력 매개변수: 번역 노드.`,
   },
@@ -2009,6 +2515,34 @@ export const I18N = {
     zh_TW: `英文字典`,
     ja: `英語辞書`,
     ko: `영어 사전`,
+  },
+  default_dict: {
+    zh: `默认词典`,
+    en: `Default Dictionary`,
+    zh_TW: `預設詞典`,
+    ja: `既定の辞書`,
+    ko: `기본 사전`,
+  },
+  ai_dict: {
+    zh: `AI 词典`,
+    en: `AI Dictionary`,
+    zh_TW: `AI 詞典`,
+    ja: `AI 辞書`,
+    ko: `AI 사전`,
+  },
+  ai_dict_api: {
+    zh: `AI 词典接口`,
+    en: `AI Dictionary API`,
+    zh_TW: `AI 詞典介面`,
+    ja: `AI 辞書 API`,
+    ko: `AI 사전 API`,
+  },
+  ai_dict_prompt: {
+    zh: `AI 词典提示词`,
+    en: `AI Dictionary Prompt`,
+    zh_TW: `AI 詞典提示詞`,
+    ja: `AI 辞書プロンプト`,
+    ko: `AI 사전 프롬프트`,
   },
   english_suggest: {
     zh: `英文建议`,
@@ -2045,38 +2579,52 @@ export const I18N = {
     ja: `無効にする`,
     ko: `비활성화 여부`,
   },
+  is_pinned: {
+    zh: `是否置顶`,
+    en: `Is Pinned`,
+    zh_TW: `是否置頂`,
+    ja: `ピン留め`,
+    ko: `고정 여부`,
+  },
+  sort_alphabetically: {
+    zh: `按字母排序`,
+    en: `Sort Alphabetically`,
+    zh_TW: `按字母排序`,
+    ja: `アルファベット順`,
+    ko: `알파벳순 정렬`,
+  },
   translate_selected: {
     zh: `是否启用划词翻译`,
     en: `If translate selected`,
-    zh_TW: `是否啟用劃詞翻譯`,
+    zh_TW: `是否啟用選取文字翻譯`,
     ja: `選択範囲の翻訳を有効にする`,
     ko: `선택 번역 사용 여부`,
   },
   use_batch_fetch: {
     zh: `是否聚合发送翻译请求`,
     en: `Whether to aggregate and send translation requests`,
-    zh_TW: `是否聚合發送翻譯請求`,
+    zh_TW: `是否彙整發送翻譯請求`,
     ja: `翻訳リクエストをまとめて送信`,
     ko: `번역 요청 일괄 전송 여부`,
   },
   batch_interval: {
     zh: `聚合请求等待时间(10-10000)`,
     en: `Aggregation request waiting time (10-10000)`,
-    zh_TW: `聚合請求等待時間(10-10000)`,
+    zh_TW: `彙整請求等待時間(10-10000)`,
     ja: `一括リクエストの待機時間(10-10000)`,
     ko: `일괄 요청 대기 시간(10-10000)`,
   },
   batch_size: {
     zh: `聚合请求最大段落数(1-100)`,
     en: `Maximum number of paragraphs in an aggregation request (1-100)`,
-    zh_TW: `聚合請求最大段落數(1-100)`,
+    zh_TW: `彙整請求最大段落數(1-100)`,
     ja: `一括リクエストの最大段落数(1-100)`,
     ko: `일괄 요청 최대 단락 수(1-100)`,
   },
   batch_length: {
     zh: `聚合请求最大文本长度(1000-100000)`,
     en: `Maximum text length for aggregation requests (1000-100000)`,
-    zh_TW: `聚合請求最大文字長度(1000-100000)`,
+    zh_TW: `彙整請求最大文字長度(1000-100000)`,
     ja: `一括リクエストの最大テキスト長(1000-100000)`,
     ko: `일괄 요청 최대 텍스트 길이(1000-100000)`,
   },
@@ -2086,6 +2634,27 @@ export const I18N = {
     zh_TW: `是否啟用串流傳輸`,
     ja: `ストリーミングを有効にする`,
     ko: `스트리밍 활성화 여부`,
+  },
+  stream_render_mode: {
+    zh: `流式渲染模式`,
+    en: `Stream render mode`,
+    zh_TW: `串流渲染模式`,
+    ja: `ストリーミングレンダリングモード`,
+    ko: `스트리밍 렌더링 모드`,
+  },
+  stream_render_realtime: {
+    zh: `实时渲染`,
+    en: `Realtime render`,
+    zh_TW: `即時渲染`,
+    ja: `リアルタイムレンダリング`,
+    ko: `실시간 렌더링`,
+  },
+  stream_render_segment: {
+    zh: `片段渲染`,
+    en: `Segment render`,
+    zh_TW: `片段渲染`,
+    ja: `セグメントレンダリング`,
+    ko: `세그먼트 렌더링`,
   },
   use_context: {
     zh: `是否启用智能上下文`,
@@ -2111,7 +2680,7 @@ export const I18N = {
   has_rich_text: {
     zh: `启用富文本翻译`,
     en: `Enable rich text translation`,
-    zh_TW: `啟用富文本翻譯`,
+    zh_TW: `啟用富文字翻譯`,
     ja: `リッチテキスト翻訳を有効にする`,
     ko: `리치 텍스트 번역 활성화`,
   },
@@ -2139,14 +2708,14 @@ export const I18N = {
   selected_translation_alert: {
     zh: `划词翻译的开启和关闭请到“规则设置”里面设置。`,
     en: `To turn selected translation on or off, please go to "Rule Settings".`,
-    zh_TW: `劃詞翻譯的開啟和關閉請到「規則設定」裡面設定。`,
+    zh_TW: `選取文字翻譯的開啟和關閉請到「規則設定」裡面設定。`,
     ja: `選択翻訳のオン/オフは「ルール設定」で行ってください。`,
     ko: `선택 번역 활성화/비활성화는 "규칙 설정"에서 하십시오.`,
   },
   mousehover_key_help: {
     zh: `当快捷键置空时表示鼠标懸停直接翻译`,
     en: `When the shortcut key is empty, it means that the mouse hovers to translate directly`,
-    zh_TW: `當快捷鍵置空時表示滑鼠懸停直接翻譯`,
+    zh_TW: `快速鍵留空時表示滑鼠懸停即直接翻譯`,
     ja: `ショートカットキーが空の場合、マウスオーバーで直接翻訳します`,
     ko: `단축키가 비어 있으면 마우스오버 시 바로 번역합니다`,
   },
@@ -2174,7 +2743,7 @@ export const I18N = {
   richtext_alt: {
     zh: `保留富文本`,
     en: `Rich Text`,
-    zh_TW: `保留富文本`,
+    zh_TW: `保留富文字`,
     ja: `リッチテキスト`,
     ko: `리치 텍스트`,
   },
@@ -2222,8 +2791,8 @@ export const I18N = {
   },
   load_setting_err: {
     zh: `数据加载出错，请刷新页面或卸载后重新安装。`,
-    en: `Please press the shortcut key combination`, // 注意：这里的英文和繁体是用户上次错误的拷贝
-    zh_TW: `請按下快速鍵組合`, // 注意：这里的英文和繁体是用户上次错误的拷贝
+    en: `Data loading error, please refresh the page or uninstall and reinstall.`,
+    zh_TW: `資料載入發生錯誤，請重新整理頁面或解除安裝後重新安裝。`,
     ja: `データ読み込みエラー。ページを更新するか、アンインストール後に再インストールしてください。`, // 翻译自 "zh"
     ko: `데이터 로딩 오류. 페이지를 새로 고치거나 제거 후 다시 설치하세요.`, // 翻译自 "zh"
   },
@@ -2251,28 +2820,28 @@ export const I18N = {
   system_prompt_helper_1: {
     zh: `1. 根据实际情况选择AI支持的聚合格式：`,
     en: `1. Select the aggregation format supported by the AI according to your needs:`,
-    zh_TW: `1. 請依實際情況選擇 AI 支援的聚合格式：`,
+    zh_TW: `1. 請依實際情況選擇 AI 支援的彙整格式：`,
     ja: `1. 実際の状況に応じて、AI が対応している集約形式を選択してください：`,
     ko: `1. 상황에 맞게 AI에서 지원하는 집계 형식을 선택하세요:`,
   },
   json_output: {
     zh: `点击切换 “JSON 格式“`,
     en: `Click to switch to "JSON Format"`,
-    zh_TW: `點擊切換「JSON 格式」`,
+    zh_TW: `點選切換「JSON 格式」`,
     ja: `クリックして「JSON 形式」に切り替え`,
     ko: `클릭하여 "JSON 형식"으로 전환`,
   },
   xml_output: {
     zh: `点击切换 “XML 格式“`,
     en: `Click to switch to "XML Format"`,
-    zh_TW: `點擊切換「XML 格式」`,
+    zh_TW: `點選切換「XML 格式」`,
     ja: `クリックして「XML 形式」に切り替え`,
     ko: `클릭하여 "XML 형식"으로 전환`,
   },
   textlines_output: {
     zh: `点击切换 “多行文本格式“`,
     en: `Click to switch to "Multi-line Text Format"`,
-    zh_TW: `點擊切換「多行文字格式」`,
+    zh_TW: `點選切換「多行文字格式」`,
     ja: `クリックして「複数行テキスト形式」に切り替え`,
     ko: `클릭하여 "여러 줄 텍스트 형식"으로 전환`,
   },
@@ -2300,7 +2869,7 @@ export const I18N = {
   favorite_words_helper: {
     zh: `导入词汇请使用txt文件，每一行一个单词。`,
     en: `To import vocabulary, please use a txt file with one word per line.`,
-    zh_TW: `匯入詞彙請使用txt文件，每一行一個單字。`,
+    zh_TW: `匯入詞彙請使用 txt 檔案，每一行一個單字。`,
     ja: `単語をインポートするには、1行に1単語ずつ記述したtxtファイルを使用してください。`,
     ko: `단어를 가져오려면 한 줄에 한 단어씩 .txt 파일을 사용하세요.`,
   },
@@ -2324,6 +2893,13 @@ export const I18N = {
     zh_TW: `迷你/常規模式`,
     ja: `ミニ/通常モード`,
     ko: `미니/일반 모드`,
+  },
+  btn_tip_dark_mode: {
+    zh: `亮色/暗色/跟随系统`,
+    en: `Light/Dark/Auto`,
+    zh_TW: `亮色/暗色/跟隨系統`,
+    ja: `ライト/ダーク/自動`,
+    ko: `라이트/다크/자동`,
   },
   api_placeholder: {
     zh: `占位符`,
@@ -2370,7 +2946,7 @@ export const I18N = {
   detected_result: {
     zh: `检测结果`,
     en: `Detect result`,
-    zh_TW: `檢測結果`,
+    zh_TW: `偵測結果`,
     ja: `検出結果`,
     ko: `감지 결과`,
   },
@@ -2395,6 +2971,13 @@ export const I18N = {
     ja: `バイリンガル表示`,
     ko: `이중 언어 표시`,
   },
+  is_blur_translation: {
+    zh: `模糊译文`,
+    en: `Blur Translation`,
+    zh_TW: `模糊譯文`,
+    ja: `翻訳をぼかす`,
+    ko: `번역 흐림`,
+  },
   is_skip_ad: {
     zh: `快进广告`,
     en: `Skip AD`,
@@ -2405,13 +2988,13 @@ export const I18N = {
   download_subtitles: {
     zh: `下载字幕`,
     en: `Download subtitles`,
-    zh_TW: `下载字幕`,
+    zh_TW: `下載字幕`,
     ja: `字幕をダウンロード`,
     ko: `자막 다운로드`,
   },
   background_styles: {
     zh: `背景样式`,
-    en: `DBackground Style`,
+    en: `Background Style`,
     zh_TW: `背景樣式`,
     ja: `背景スタイル`,
     ko: `배경 스타일`,
@@ -2437,10 +3020,52 @@ export const I18N = {
     ja: `AIによるインテリジェントな文分割`,
     ko: `AI 지능형 문장 분리`,
   },
+  builtin_sentence_break: {
+    zh: `内置断句`,
+    en: `Built-in Sentence Break`,
+    zh_TW: `內置斷句`,
+    ja: `内蔵文分割`,
+    ko: `내장 문장 분리`,
+  },
+  rule_sentence_break: {
+    zh: `规则断句`,
+    en: `Rule-based Break`,
+    zh_TW: `規則斷句`,
+    ja: `ルールベース分割`,
+    ko: `규칙 기반 분리`,
+  },
+  statistical_sentence_break: {
+    zh: `统计断句`,
+    en: `Statistical Break`,
+    zh_TW: `統計斷句`,
+    ja: `統計的分割`,
+    ko: `통계 기반 분리`,
+  },
+  force_subtitle_retranslate: {
+    zh: `强制重翻`,
+    en: `Force re-translate`,
+    zh_TW: `強制重翻`,
+    ja: `強制再翻訳`,
+    ko: `강제 재번역`,
+  },
+  ai_enhanced_context: {
+    zh: `增强智能上下文`,
+    en: `Enhanced Intelligent Context`,
+    zh_TW: `增強智慧上下文`,
+    ja: `強化インテリジェントコンテキスト`,
+    ko: `강화 지능형 컨텍스트`,
+  },
+  ai_context_analyzing: {
+    zh: `AI正在分析视频内容...`,
+    en: `AI is analyzing video content...`,
+    zh_TW: `AI正在分析影片內容...`,
+    ja: `AIが動画内容を分析中...`,
+    ko: `AI가 비디오 콘텐츠를 분석 중...`,
+  },
   ai_chunk_length: {
     zh: `AI处理切割长度(200-20000)`,
     en: `AI processing chunk length(200-20000)`,
-    zh_TW: `AI处理切割长度(200-20000)`,
+    zh_TW: `AI 處理切割長度(200-20000)`,
     ja: `AI処理のチャンク長(200-20000)`,
     ko: `AI 처리 청크 길이(200-20000)`,
   },
@@ -2454,98 +3079,119 @@ export const I18N = {
   subtitle_helper_2: {
     zh: `2、插件内置基础的字幕合并、断句算法，可满足大部分情况。`,
     en: `2. The plug-in has built-in basic subtitle merging and sentence segmentation algorithms, which can meet most situations.`,
-    zh_TW: `2.插件內建基礎的字幕合併、斷句演算法，可滿足大部分情況。`,
+    zh_TW: `2. 擴充功能內建基礎的字幕合併、斷句演算法，可滿足大部分情況。`,
     ja: `2. プラグインには基本的な字幕結合と文分割アルゴリズムが組み込まれており、ほとんどの状況に対応できます。`,
     ko: `2. 플러그인에는 기본적인 자막 병합 및 문장 분리 알고리즘이 내장되어 있어 대부분의 상황에 대응할 수 있습니다.`,
   },
   subtitle_helper_3: {
-    zh: `3、亦可以启用AI智能断句，但需考虑切割长度及AI接口能力，可能处理时间会很长，甚至处理失败，导致无法看到字幕。`,
-    en: `3. You can also enable AI intelligent segmentation, but you need to consider the segmentation length and AI interface capabilities. The processing time may be very long or even fail, resulting in the inability to see subtitles.`,
-    zh_TW: `3.亦可啟用AI智能斷句，但需考慮切割長度及AI介面能力，可能處理時間會很長，甚至處理失敗，導致無法看到字幕。`,
-    ja: `3. AIインテリジェント文分割を有効にすることもできますが、分割長とAIインターフェースの能力を考慮する必要があり、処理時間が長くなったり、失敗して字幕が表示されなくなる可能性があります。`,
-    ko: `3. AI 지능형 분리를 활성화할 수도 있지만, 분리 길이와 AI 인터페이스의 능력을 고려해야 하며, 처리 시간이 매우 길거나 실패하여 자막을 볼 수 없게 될 수도 있습니다.`,
+    zh: `3、亦可以启用AI智能断句，但需考虑切割长度及AI接口能力，可能处理时间会很长。若处理失败，将自动降级为内置断句并翻译。`,
+    en: `3. You can also enable AI intelligent segmentation, but consider the chunk length and AI interface capacity, as processing may take a long time. If it fails, it will automatically fall back to built-in sentence break and translation.`,
+    zh_TW: `3. 亦可啟用 AI 智慧斷句，但需考慮切割長度及 AI 介面能力，處理時間可能會很長。若處理失敗，將自動降級為內置斷句並翻譯。`,
+    ja: `3. AIによるインテリジェントな文分割を有効にすることもできますが、チャンク長やAIの処理能力を考慮する必要があり、処理に時間がかかる場合があります。処理が失敗した場合は、自動的に内蔵文分割と翻訳にフォールバックされます。`,
+    ko: `3. AI 지능형 분리를 활성화할 수도 있지만, 청크 길이와 AI 인터페이스 처리 능력을 고려해야 하며 처리 시간이 길어질 수 있습니다. 처리에 실패할 경우 자동으로 내장 문장 분리 및 번역으로 대체됩니다.`,
   },
   show_subtitle_list: {
     zh: `显示字幕列表`,
     en: `Show Subtitle List`,
-    zh_TW: `顯示字幕列表`,
+    zh_TW: `顯示字幕清單`,
     ja: `字幕リストを表示`,
     ko: `자막 목록 표시`,
+  },
+  subtitle_loading_notification: {
+    zh: `字幕加载通知`,
+    en: `Subtitle loading notification`,
+    zh_TW: `字幕載入通知`,
+    ja: `字幕読み込み通知`,
+    ko: `자막 로딩 알림`,
+  },
+  hide_subtitle_button: {
+    zh: `隐藏功能按钮`,
+    en: `Hide function button`,
+    zh_TW: `隱藏功能按鈕`,
+    ja: `機能ボタンを非表示`,
+    ko: `기능 버튼 숨기기`,
+  },
+  subtitle_hover_lookup: {
+    zh: `悬停查词`,
+    en: `Hover Word Lookup`,
+    zh_TW: `懸停查詞`,
+    ja: `ホバー辞書検索`,
+    ko: `호버 단어 조회`,
   },
   default_styles_example: {
     zh: `默认样式参考：`,
     en: `Default styles reference:`,
-    zh_TW: `認樣式參考：`,
+    zh_TW: `預設樣式參考：`,
     ja: `デフォルトスタイルの例：`,
     ko: `기본 스타일 예시:`,
   },
   subtitle_load_succeed: {
     zh: `双语字幕加载成功！`,
     en: `Bilingual subtitles loaded successfully!`,
-    zh_TW: `双语字幕加载成功！`,
+    zh_TW: `雙語字幕載入成功！`,
     ja: `バイリンガル字幕の読み込みに成功しました！`,
     ko: `이중 언어 자막 로딩 성공!`,
   },
   subtitle_load_failed: {
     zh: `双语字幕加载失败！`,
     en: `Failed to load bilingual subtitles!`,
-    zh_TW: `双语字幕加载失败！`,
+    zh_TW: `雙語字幕載入失敗！`,
     ja: `バイリンガル字幕の読み込みに失敗しました！`,
     ko: `이중 언어 자막 로딩 실패!`,
   },
   try_get_subtitle_data: {
     zh: `尝试获取字幕数据，请稍候...`,
     en: `Trying to get subtitle data, please wait...`,
-    zh_TW: `尝试获取字幕数据，请稍候...`,
+    zh_TW: `嘗試取得字幕資料，請稍候...`,
     ja: `字幕データを取得しています。お待ちください...`,
     ko: `자막 데이터를 가져오는 중입니다. 잠시 기다려주세요...`,
   },
   subtitle_data_processing: {
     zh: `字幕数据处理中...`,
     en: `Subtitle data processing...`,
-    zh_TW: `字幕数据处理中...`,
+    zh_TW: `字幕資料處理中...`,
     ja: `字幕データを処理中...`,
     ko: `자막 데이터 처리 중...`,
   },
   starting_to_process_subtitle: {
     zh: `开始处理字幕数据...`,
     en: `Starting to process subtitle data...`,
-    zh_TW: `开始处理字幕数据...`,
+    zh_TW: `開始處理字幕資料...`,
     ja: `字幕データの処理を開始します...`,
     ko: `자막 데이터 처리를 시작합니다...`,
   },
   subtitle_data_is_ready: {
     zh: `字幕数据已准备就绪，请点击KT按钮加载`,
     en: `The subtitle data is ready, please click the KT button to load it`,
-    zh_TW: `字幕資料已準備就緒，請點擊KT按鈕加載`,
+    zh_TW: `字幕資料已準備就緒，請點選 KT 按鈕載入`,
     ja: `字幕データの準備ができました。KTボタンをクリックして読み込んでください`,
     ko: `자막 데이터가 준비되었습니다. KT 버튼을 클릭하여 로드하세요`,
   },
   starting_reprocess_events: {
     zh: `重新处理字幕数据...`,
     en: `Reprocess the subtitle data...`,
-    zh_TW: `重新处理字幕数据...`,
+    zh_TW: `重新處理字幕資料...`,
     ja: `字幕データを再処理しています...`,
     ko: `자막 데이터를 다시 처리 중...`,
   },
   waitting_for_subtitle: {
     zh: `请等待字幕数据`,
     en: `Please wait for the subtitle data.`,
-    zh_TW: `请等待字幕数据`,
+    zh_TW: `請等待字幕資料`,
     ja: `字幕データを待機中`,
     ko: `자막 데이터를 기다려주세요`,
   },
   ai_processing_pls_wait: {
     zh: `AI处理中，请稍等...`,
     en: `AI processing in progress, please wait...`,
-    zh_TW: `AI处理中，请稍等...`,
+    zh_TW: `AI 處理中，請稍候...`,
     ja: `AI処理中です。お待ちください...`,
     ko: `AI 처리 중입니다. 잠시 기다려주세요...`,
   },
   processing_subtitles: {
     zh: `字幕处理中...`,
     en: `Subtitle processing...`,
-    zh_TW: `字幕处理中...`,
+    zh_TW: `字幕處理中...`,
     ja: `字幕処理中...`,
     ko: `자막 처리 중...`,
   },
@@ -2559,7 +3205,7 @@ export const I18N = {
   subtitle_is_not_yet_ready: {
     zh: `字幕数据尚未准备好`,
     en: `Subtitle is not yet ready.`,
-    zh_TW: `字幕数据尚未准备好`,
+    zh_TW: `字幕資料尚未準備好`,
     ja: `字幕データの準備がまだできていません。`,
     ko: `자막 데이터가 아직 준비되지 않았습니다.`,
   },
@@ -2573,7 +3219,7 @@ export const I18N = {
   goto_custom_api_example: {
     zh: `点击查看【自定义接口示例】`,
     en: `Click to view [Custom Interface Example]`,
-    zh_TW: `點選查看【自訂介面範例】`,
+    zh_TW: `點選檢視【自訂介面範例】`,
     ja: `【カスタムインターフェースの例】を見る`,
     ko: `[사용자 지정 인터페이스 예시] 보기`,
   },
@@ -2594,7 +3240,7 @@ export const I18N = {
   highlight_words: {
     zh: `高亮收藏词汇`,
     en: `Highlight favorite words`,
-    zh_TW: `高亮收藏詞彙`,
+    zh_TW: `醒目標示收藏詞彙`,
     ja: `お気に入り単語をハイライト`,
     ko: `즐겨찾는 단어 하이라이트`,
   },
@@ -2629,14 +3275,14 @@ export const I18N = {
   highlight_beforetrans: {
     zh: `翻译前高亮`,
     en: `Highlight before translation`,
-    zh_TW: `翻譯前高亮`,
+    zh_TW: `翻譯前醒目標示`,
     ja: `翻訳前にハイライト`,
     ko: `번역 전 하이라이트`,
   },
   highlight_aftertrans: {
     zh: `翻译后高亮`,
     en: `Highlight after translation`,
-    zh_TW: `翻譯後高亮`,
+    zh_TW: `翻譯後醒目標示`,
     ja: `翻訳後にハイライト`,
     ko: `번역 후 하이라이트`,
   },
@@ -2668,24 +3314,31 @@ export const I18N = {
     ja: `スタイルコード`,
     ko: `스타일 코드`,
   },
+  long_sentence_threshold: {
+    zh: `规则断句阈值 (20-300字符)`,
+    en: `Rule-based segmentation threshold (20-300 chars)`,
+    zh_TW: `規則斷句閾值 (20-300 字元)`,
+    ja: `ルールベース分割閾値 (20-300文字)`,
+    ko: `규칙 기반 분할 임계값 (20-300자)`,
+  },
   pre_trans_seconds: {
     zh: `提前翻译时长 (10-36000s)`,
     en: `Pre translation seconds (10-36000s)`,
-    zh_TW: `提前翻译时长 (10-36000s)`,
+    zh_TW: `提前翻譯時長 (10-36000s)`,
     ja: `事前翻訳時間 (10-36000s)`,
     ko: `미리 번역 시간 (10-36000s)`,
   },
   throttle_trans_interval: {
     zh: `节流翻译间隔 (1-3600s)`,
     en: `Throttling translation interval (1-3600s)`,
-    zh_TW: `节流翻译间隔 (1-3600s)`,
+    zh_TW: `節流翻譯間隔 (1-3600s)`,
     ja: `翻訳間隔のスロットリング (1-3600s)`,
     ko: `번역 간격 조절 (1-3600s)`,
   },
   show_origin_subtitle: {
     zh: `显示原字幕`,
     en: `Show original subtitles`,
-    zh_TW: `显示原字幕`,
+    zh_TW: `顯示原字幕`,
     ja: `原字幕を表示`,
     ko: `원본 자막 표시`,
   },
@@ -2776,7 +3429,7 @@ export const I18N = {
   show_dot_mobile: {
     zh: `仅移动端`,
     en: `Mobile Only`,
-    zh_TW: `僅移動端`,
+    zh_TW: `僅限行動裝置`,
     ja: `モバイルのみ`,
     ko: `모바일 전용`,
   },
@@ -2790,9 +3443,128 @@ export const I18N = {
   show_dot_disable: {
     zh: `禁用`,
     en: `Disable`,
-    zh_TW: `禁用`,
+    zh_TW: `停用`,
     ja: `無効`,
     ko: `사용 안 함`,
+  },
+  rule_disabled: {
+    zh: `规则已禁用`,
+    en: `Rule Disabled`,
+    zh_TW: `規則已停用`,
+    ja: `ルールが無効になっています`,
+    ko: `규칙이 비활성화되었습니다`,
+  },
+  rule_enabled: {
+    zh: `规则已启用`,
+    en: `Rule Enabled`,
+    zh_TW: `規則已啟用`,
+    ja: `ルールが有効になっています`,
+    ko: `규칙이 활성화되었습니다`,
+  },
+  rule_toggle_failed: {
+    zh: `规则切换失败`,
+    en: `Failed to toggle rule`,
+    zh_TW: `規則切換失敗`,
+    ja: `ルールの切り替えに失敗しました`,
+    ko: `규칙 전환 실패`,
+  },
+  seg_trans_diff_warning: {
+    zh: `断句和翻译服务不同，翻译引擎会重复翻译字幕`,
+    en: `Segmentation and translation engines differ; subtitles will be re-translated.`,
+    zh_TW: `斷句和翻譯服務不同，翻譯引擎會重複翻譯字幕`,
+    ja: `セグメンテーションと翻訳エンジンが異なります。字幕は再翻訳されます。`,
+    ko: `분할과 번역 엔진이 다릅니다. 자막이 다시 번역됩니다.`,
+  },
+  subtitle_style_preview: {
+    zh: `样式预览`,
+    en: `Style Preview`,
+    zh_TW: `樣式預覽`,
+    ja: `スタイルプレビュー`,
+    ko: `스타일 미리보기`,
+  },
+  subtitle_preview_sample: {
+    zh: `这是示例字幕文本`,
+    en: `This is an example subtitle`,
+    zh_TW: `這是範例字幕文字`,
+    ja: `これはサンプル字幕テキストです`,
+    ko: `예시 자막 텍스트입니다`,
+  },
+  font_size: {
+    zh: `字体大小`,
+    en: `Font Size`,
+    zh_TW: `字體大小`,
+    ja: `フォントサイズ`,
+    ko: `글꼴 크기`,
+  },
+  font_color: {
+    zh: `字体颜色`,
+    en: `Font Color`,
+    zh_TW: `字體顏色`,
+    ja: `フォントの色`,
+    ko: `글꼴 색상`,
+  },
+  background_color: {
+    zh: `背景颜色`,
+    en: `Background Color`,
+    zh_TW: `背景顏色`,
+    ja: `背景色`,
+    ko: `배경색`,
+  },
+  opacity: {
+    zh: `透明度`,
+    en: `Opacity`,
+    zh_TW: `透明度`,
+    ja: `不透明度`,
+    ko: `불투명도`,
+  },
+  line_height: {
+    zh: `行高`,
+    en: `Line Height`,
+    zh_TW: `行高`,
+    ja: `行の高さ`,
+    ko: `줄 높이`,
+  },
+  padding: {
+    zh: `内边距`,
+    en: `Padding`,
+    zh_TW: `內邊距`,
+    ja: `余白`,
+    ko: `안쪽 여백`,
+  },
+  vertical: {
+    zh: `上下`,
+    en: `Vertical`,
+    zh_TW: `上下`,
+    ja: `上下`,
+    ko: `상하`,
+  },
+  horizontal: {
+    zh: `左右`,
+    en: `Horizontal`,
+    zh_TW: `左右`,
+    ja: `左右`,
+    ko: `좌우`,
+  },
+  text_shadow: {
+    zh: `文字阴影`,
+    en: `Text Shadow`,
+    zh_TW: `文字陰影`,
+    ja: `テキストの影`,
+    ko: `텍스트 그림자`,
+  },
+  advanced_css: {
+    zh: `高级 CSS 编辑`,
+    en: `Advanced CSS`,
+    zh_TW: `進階 CSS 編輯`,
+    ja: `高度な CSS 編集`,
+    ko: `고급 CSS 편집`,
+  },
+  close: {
+    zh: `关闭`,
+    en: `Close`,
+    zh_TW: `關閉`,
+    ja: `閉じる`,
+    ko: `닫기`,
   },
 };
 

@@ -18,8 +18,13 @@ import MouseIcon from "@mui/icons-material/Mouse";
 import SubtitlesIcon from "@mui/icons-material/Subtitles";
 import FormatColorText from "@mui/icons-material/FormatColorText";
 import BugReportIcon from "@mui/icons-material/BugReport";
+import TextSnippetIcon from "@mui/icons-material/TextSnippet";
 
+/**
+ * 单个侧边栏路由导航菜单项组件
+ */
 function LinkItem({ label, url, icon }) {
+  // 检查当前 URL 路由是否与该菜单项匹配，匹配的会被激活高亮显示
   const match = useMatch(url);
   return (
     <ListItemButton component={NavLink} to={url} selected={!!match}>
@@ -29,8 +34,12 @@ function LinkItem({ label, url, icon }) {
   );
 }
 
+/**
+ * 侧边栏导航列表栏组件 (Navigator)
+ */
 export default function Navigator(props) {
   const i18n = useI18n();
+  // 选项设置页的菜单列表项配置
   const memus = [
     {
       id: "basic_setting",
@@ -49,6 +58,12 @@ export default function Navigator(props) {
       label: i18n("apis_setting"),
       url: "/apis",
       icon: <ApiIcon />,
+    },
+    {
+      id: "prompt_management",
+      label: i18n("prompt_management", "提示词管理"),
+      url: "/prompts",
+      icon: <TextSnippetIcon />,
     },
     {
       id: "styles_setting",

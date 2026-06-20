@@ -1,76 +1,143 @@
 import { logger } from "../libs/log.js";
-import { apiSubtitle } from "../apis/index.js";
+import { apiSubtitle, apiSummarizeContext } from "../apis/index.js";
 import { BilingualSubtitleManager } from "./BilingualSubtitleManager.js";
 import { YouTubeSubtitleList } from "./YouTubeSubtitleList.js";
-import {
-  MSG_XHR_DATA_YOUTUBE,
-  APP_NAME,
-  OPT_LANGS_TO_CODE,
-  OPT_TRANS_MICROSOFT,
-  OPT_LANGS_SPEC_DEFAULT,
-  OPT_ENHANCE_ON,
-  OPT_ENHANCE_MOBILE_OFF,
-} from "../config";
-import { sleep, downloadBlobFile } from "../libs/utils.js";
-import { createLogoSVG } from "../libs/svg.js";
-import { randomBetween } from "../libs/utils.js";
+import { MSG_XHR_DATA_YOUTUBE, API_SPE_TYPES } from "../config";
+import { downloadBlobFile } from "../libs/utils.js";
 import { newI18n } from "../config";
-import DomManager from "../libs/domManager.js";
-import { Menus } from "./Menus.js";
 import { buildBilingualVtt } from "./vtt.js";
-import { isMobile } from "../libs/mobile.js";
+import { getDocInfo } from "../libs/docInfo.js";
+import { isSubtitleModeEnabled } from "./modes.js";
+import { clearMsgHistory } from "../apis/history.js";
+import {
+  buildTrackKey,
+  findCaptionTrack,
+  getCaptionTracks,
+  getSubtitleEvents,
+  isSameLang,
+} from "./youtubeCaptionTracks.js";
+import { eventsToSubtitles } from "./youtubeAiSegmentation.js";
+import {
+  builtinSegment,
+  formatSubtitles,
+  genFlatEvents,
+  getFromLang,
+  normalizeTimedTextEvents,
+} from "./youtubeSubtitleProcessing.js";
+import {
+  CONTROLS_SELECTOR,
+  VIDEO_SELECTOR,
+  YT_AD_SELECTOR,
+  YT_SUBTITLE_BUTTON_SELECTOR,
+  YouTubePlayerUi,
+  waitForElement,
+} from "./youtubePlayerUi.js";
 
-const VIDEO_SELECT = "#container video";
-const CONTORLS_SELECT = ".ytp-right-controls";
-const YT_CAPTION_SELECT = "#ytp-caption-window-container";
-const YT_AD_SELECT = ".video-ads";
-const YT_SUBTITLE_BTN_SELECT = "button.ytp-subtitles-button";
-
+/**
+ * YouTube 字幕翻译与双语渲染入口。
+ * 负责页面生命周期、字幕轨处理调度、异步竞态保护，并把结果交给播放器渲染器。
+ */
 class YouTubeCaptionProvider {
+  // 扩展配置选项对象
   #setting = {};
 
+  // 最终处理合并、翻译好的双语字幕数组（包含开始/结束时间、原文、翻译）
   #subtitles = [];
+  // YouTube 返回的原生字幕事件流数据，直接保存以备重处理/降级使用
   #events = [];
+  #rawSubtitleEvents = [];
+  // 展平并排好序的细粒度单词级别字幕流
   #flatEvents = [];
+  // 翻译处理进度百分比 (0-100)
   #progressedNum = 0;
+  // 视频原字幕的源语言编码，默认 auto
   #fromLang = "auto";
+  // 网页上下文及大模型提炼的大纲信息，辅助提高翻译专有名词与句式准确率
+  #docInfo = {};
+  // 原生视频的完整 shortDescription 描述文本
+  #fullDescription = "";
 
+  // 当前正在处理的字幕轨唯一标识 Key
   #processingId = null;
+  // 递增的版本号，用于避免前一视频异步翻译返回污染当前新视频的竞态条件
+  #processingVersion = 0;
+  // 当前已成功激活并运行的字幕轨唯一标识 Key
+  #activeTrackKey = null;
+  // 当前字幕断句/分块处理的取消控制器，用于视频或字幕轨切换时中止旧流式请求
+  #subtitleAbortController = null;
 
+  // 控制双语字幕渲染、显示和位置计算的管理器实例
   #managerInstance = null;
-  #toggleButton = null;
-  #isMenuShow = false;
-  #notificationEl = null;
-  #notificationTimeout = null;
+  // 国际化文案翻译辅助函数
   #i18n = () => "";
-  #menuManager = null; // 菜单管理器实例
+  // YouTube 播放器按钮、菜单、通知等 DOM 操作管理器
+  #playerUi = null;
+  // YouTube 底部控制条原生字幕激活状态的 DOM 监听器
+  #ytSubtitleStateObserver = null;
 
-  // 新增：字幕列表管理器实例
+  // 挂载在视频右侧/下方的双语字幕列表面板管理器实例
   #subtitleListManager = null;
 
+  /**
+   * 创建 YouTube 字幕处理器实例，并初始化用户配置、国际化和播放器 UI 管理器。
+   *
+   * @param {object} [setting={}] 字幕模块运行配置。
+   */
   constructor(setting = {}) {
     this.#setting = { ...setting, showOrigin: false, showVideoCaption: true };
     this.#i18n = newI18n(setting.uiLang || "zh");
+    this.#playerUi = new YouTubePlayerUi({
+      getSetting: () => this.#setting,
+      getMenuProps: () => this.#getMenuProps(),
+      getVideoEl: () => this.#videoEl,
+    });
   }
 
+  /**
+   * 当前 YouTube 播放页 URL 中的视频 ID。
+   *
+   * @returns {string|null} URL 查询参数 v 的值；非视频页返回 null。
+   */
   get #videoId() {
     const docUrl = new URL(document.location.href);
     return docUrl.searchParams.get("v");
   }
 
+  /**
+   * 当前页面中 YouTube 原生 video 播放器节点。
+   *
+   * @returns {HTMLVideoElement|null} 匹配到的播放器 DOM 节点。
+   */
   get #videoEl() {
-    return document.querySelector(VIDEO_SELECT);
+    return document.querySelector(VIDEO_SELECTOR);
   }
 
+  /**
+   * 更新字幕处理进度，并同步刷新已展开的菜单状态。
+   *
+   * @param {number} num 新的处理进度百分比。
+   */
   set #progressed(num) {
     this.#progressedNum = num;
-    this.#updateMenuProps(); // 更新菜单 props
+    this.#playerUi.updateMenuProps();
   }
 
+  /**
+   * 当前字幕处理进度百分比。
+   *
+   * @returns {number} 处理进度，取值通常为 0-100。
+   */
   get #progressed() {
     return this.#progressedNum;
   }
 
+  /**
+   * 初始化 YouTube 页面监听器和字幕按钮注入流程。
+   * 只注册事件与 DOM 观察器，真正的字幕处理由拦截到 timedtext 请求后触发。
+   *
+   * @public
+   * @returns {void}
+   */
   initialize() {
     window.addEventListener("message", (event) => {
       if (event.data?.type === MSG_XHR_DATA_YOUTUBE) {
@@ -85,35 +152,94 @@ class YouTubeCaptionProvider {
       logger.debug("Youtube Provider: yt-navigate-finish", this.#videoId);
 
       this.#destroyManager();
+      clearMsgHistory(this.#setting.apiSlug);
 
       this.#subtitles = [];
       this.#events = [];
+      this.#rawSubtitleEvents = [];
       this.#flatEvents = [];
       this.#progressed = 0;
       this.#fromLang = "auto";
-      this.#updateMenuProps(); // 更新菜单 props
+      this.#docInfo = {};
+      this.#fullDescription = "";
+      this.#processingId = null;
+      this.#processingVersion += 1;
+      this.#activeTrackKey = null;
+      this.#subtitleAbortController?.abort();
+      this.#subtitleAbortController = null;
+      this.#playerUi.updateMenuProps();
     });
 
-    this.#waitForElement(CONTORLS_SELECT, (ytControls) => {
-      const ytSubtitleBtn = ytControls.querySelector(YT_SUBTITLE_BTN_SELECT);
+    waitForElement(CONTROLS_SELECTOR, (ytControls) => {
+      const ytSubtitleBtn = ytControls.querySelector(
+        YT_SUBTITLE_BUTTON_SELECTOR
+      );
       if (ytSubtitleBtn) {
-        ytSubtitleBtn.addEventListener("click", () => {
-          if (ytSubtitleBtn.getAttribute("aria-pressed") === "true") {
-            this.#startManager();
-          } else {
-            this.#destroyManager();
-          }
-        });
+        this.#observeYtSubtitleState(ytSubtitleBtn);
       }
 
-      this.#injectToggleButton(ytControls);
+      this.#playerUi.injectToggleButton(ytControls);
     });
 
-    this.#waitForElement(YT_AD_SELECT, (adContainer) => {
+    waitForElement(YT_AD_SELECTOR, (adContainer) => {
       this.#moAds(adContainer);
     });
   }
 
+  /**
+   * 建立对 YouTube 原生字幕按钮状态的 MutationObserver 观察器。
+   *
+   * @private
+   * @param {HTMLButtonElement} ytSubtitleBtn YouTube 原生控制栏中的字幕切换按钮 DOM。
+   * @returns {void}
+   */
+  #observeYtSubtitleState(ytSubtitleBtn) {
+    this.#ytSubtitleStateObserver?.disconnect();
+    this.#ytSubtitleStateObserver = new MutationObserver(() => {
+      this.#syncYtSubtitleState(ytSubtitleBtn);
+    });
+    this.#ytSubtitleStateObserver.observe(ytSubtitleBtn, {
+      attributes: true,
+      attributeFilter: ["aria-pressed"],
+    });
+    this.#syncYtSubtitleState(ytSubtitleBtn);
+  }
+
+  /**
+   * 同步本插件的双语字幕状态至原生的字幕开关属性。
+   *
+   * @private
+   * @param {HTMLButtonElement} ytSubtitleBtn YouTube 原生字幕按钮 DOM。
+   * @returns {void}
+   */
+  #syncYtSubtitleState(ytSubtitleBtn) {
+    if (ytSubtitleBtn.getAttribute("aria-pressed") === "true") {
+      this.#startManager();
+    } else {
+      this.#destroyManager();
+    }
+  }
+
+  /**
+   * 检测当前 YouTube 视频上原生字幕按钮是否处于开启状态。
+   *
+   * @private
+   * @returns {boolean} 开启返回 true，未开启或找不到按钮返回 false。
+   */
+  #isYtSubtitleEnabled() {
+    const ytSubtitleBtn = document.querySelector(YT_SUBTITLE_BUTTON_SELECTOR);
+    return (
+      !ytSubtitleBtn || ytSubtitleBtn.getAttribute("aria-pressed") === "true"
+    );
+  }
+
+  /**
+   * 监听 YouTube 广告 DOM 状态，并在广告开始/结束时同步字幕渲染器状态。
+   *
+   * @private
+   * @param {HTMLElement} adContainer YouTube 广告容器 DOM 节点。
+   * @returns {void}
+   */
   #moAds(adContainer) {
     const adLayoutSelector = ".ytp-ad-player-overlay-layout";
     const skipBtnSelector =
@@ -121,52 +247,49 @@ class YouTubeCaptionProvider {
     const observer = new MutationObserver((mutations) => {
       const { skipAd = false } = this.#setting;
       for (const mutation of mutations) {
-        if (mutation.type === "childList") {
-          const videoEl = this.#videoEl;
-          mutation.addedNodes.forEach((node) => {
-            if (node.nodeType !== Node.ELEMENT_NODE) return;
+        if (mutation.type !== "childList") continue;
 
-            if (node.matches(adLayoutSelector)) {
-              logger.debug("Youtube Provider: AD start playing!", node);
-              // todo: 顺带把广告快速跳过
-              if (videoEl && skipAd) {
-                videoEl.playbackRate = 16;
-                videoEl.currentTime = videoEl.duration;
-              }
-              if (this.#managerInstance) {
-                this.#managerInstance.setIsAdPlaying(true);
-              }
-            } else if (node.matches(skipBtnSelector) && skipAd) {
-              logger.debug("Youtube Provider: AD skip button!", node);
-              node.click();
+        const videoEl = this.#videoEl;
+        mutation.addedNodes.forEach((node) => {
+          if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+          if (node.matches(adLayoutSelector)) {
+            logger.debug("Youtube Provider: AD start playing!", node);
+            if (videoEl && skipAd) {
+              // REVIEW: 沿用原有直接 16 倍速并跳到广告末尾的行为，可能触发 YouTube 风控。
+              // REVIEW: 广告结束时仍会重置到 1 倍速，可能覆盖用户自定义倍速；后续应单独修复。
+              videoEl.playbackRate = 16;
+              videoEl.currentTime = videoEl.duration;
             }
+            this.#managerInstance?.setIsAdPlaying(true);
+          } else if (node.matches(skipBtnSelector) && skipAd) {
+            logger.debug("Youtube Provider: AD skip button!", node);
+            node.click();
+          }
 
-            if (skipAd) {
-              const skipBtn = node?.querySelector(skipBtnSelector);
-              if (skipBtn) {
-                logger.debug("Youtube Provider: AD skip button!!", skipBtn);
-                skipBtn.click();
-              }
+          if (skipAd) {
+            const skipBtn = node?.querySelector(skipBtnSelector);
+            if (skipBtn) {
+              logger.debug("Youtube Provider: AD skip button!!", skipBtn);
+              skipBtn.click();
             }
-          });
-          mutation.removedNodes.forEach((node) => {
-            if (node.nodeType !== Node.ELEMENT_NODE) return;
+          }
+        });
 
-            if (node.matches(adLayoutSelector)) {
-              logger.debug("Youtube Provider: Ad ends!");
+        mutation.removedNodes.forEach((node) => {
+          if (node.nodeType !== Node.ELEMENT_NODE) return;
 
-              if (!this.#setting.showOrigin) {
-                this.#hideYtCaption();
-              }
-              if (videoEl && skipAd) {
-                videoEl.playbackRate = 1;
-              }
-              if (this.#managerInstance) {
-                this.#managerInstance.setIsAdPlaying(false);
-              }
+          if (node.matches(adLayoutSelector)) {
+            logger.debug("Youtube Provider: Ad ends!");
+            if (!this.#setting.showOrigin) {
+              this.#playerUi.hideYtCaption();
             }
-          });
-        }
+            if (videoEl && skipAd) {
+              videoEl.playbackRate = 1;
+            }
+            this.#managerInstance?.setIsAdPlaying(false);
+          }
+        });
       }
     });
 
@@ -176,46 +299,56 @@ class YouTubeCaptionProvider {
     });
   }
 
-  #waitForElement(selector, callback) {
-    const element = document.querySelector(selector);
-    if (element) {
-      callback(element);
-      return;
-    }
-
-    const observer = new MutationObserver((mutations, obs) => {
-      const targetNode = document.querySelector(selector);
-      if (targetNode) {
-        obs.disconnect();
-        callback(targetNode);
-      }
-    });
-
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-    });
-  }
-
+  /**
+   * 外部 UI 设置变更响应总入口。
+   *
+   * @public
+   * @param {object} param0 参数对象。
+   * @param {string} param0.name 设置项属性键名。
+   * @param {*} param0.value 设置项的新值。
+   * @returns {void}
+   */
   updateSetting({ name, value }) {
     if (this.#setting[name] === value) return;
 
     logger.debug("Youtube Provider: update setting", name, value);
     this.#setting[name] = value;
 
-    this.#updateMenuProps(); // 更新菜单 props
+    this.#playerUi.updateMenuProps();
 
-    if (name === "isBilingual") {
+    if (
+      name === "isBilingual" ||
+      name === "blurTranslation" ||
+      name === "displayOrder"
+    ) {
       this.#managerInstance?.updateSetting({ [name]: value });
-    } else if (name === "segSlug") {
+    } else if (name === "segSlug" || name === "forceSubtitleRetranslate") {
       this.#reProcessEvents();
     } else if (name === "showOrigin") {
       this.#toggleShowOrigin();
     } else if (name === "showVideoCaption") {
       this.#managerInstance?.setVideoVisible(value);
+    } else if (name === "aiContextSlug") {
+      this.#reProcessEventsWithContext();
+    } else if (name === "showLoadNotification" && value === false) {
+      this.#playerUi.hideNotification();
+    } else if (name === "hideSubtitleButton") {
+      if (value === true) {
+        this.#playerUi.removeToggleButton();
+      } else {
+        this.#playerUi.injectToggleButton(
+          document.querySelector(CONTROLS_SELECTOR)
+        );
+      }
     }
   }
 
+  /**
+   * 根据“显示原版字幕”的切换配置，执行字幕渲染管理器的挂载与销毁。
+   *
+   * @private
+   * @returns {void}
+   */
   #toggleShowOrigin() {
     if (this.#setting.showOrigin) {
       this.#destroyManager();
@@ -224,6 +357,12 @@ class YouTubeCaptionProvider {
     }
   }
 
+  /**
+   * 将当前翻译组装完毕的双语字幕打包为 VTT 格式文件，并唤起浏览器下载。
+   *
+   * @public
+   * @returns {void}
+   */
   downloadSubtitle() {
     if (!this.#subtitles.length || this.#progressed !== 100) {
       logger.debug("Youtube Provider: The subtitle is not yet ready.");
@@ -242,12 +381,22 @@ class YouTubeCaptionProvider {
   }
 
   /**
-   * 获取菜单组件的 props
+   * 获取字幕菜单 React 组件的 props。
+   *
    * @private
+   * @returns {object} 传给字幕菜单 React 组件的 props。
    */
   #getMenuProps() {
-    const { transApis, segSlug, skipAd, isBilingual, showOrigin, showVideoCaption } =
-      this.#setting;
+    const {
+      transApis,
+      segSlug,
+      skipAd,
+      isBilingual,
+      blurTranslation,
+      showOrigin,
+      showVideoCaption,
+      aiContextSlug,
+    } = this.#setting;
     return {
       i18n: this.#i18n,
       updateSetting: this.updateSetting.bind(this),
@@ -258,203 +407,34 @@ class YouTubeCaptionProvider {
         segSlug,
         skipAd,
         isBilingual,
+        blurTranslation,
         showOrigin,
         showVideoCaption,
+        aiContextSlug,
       },
     };
   }
 
   /**
-   * 更新菜单组件的 props
+   * 检查异步处理版本是否已经过期。
+   *
    * @private
+   * @param {number} version 异步任务创建时捕获的版本号。
+   * @returns {boolean} 当前实例版本已变化时返回 true。
    */
-  #updateMenuProps() {
-    if (this.#menuManager && this.#isMenuShow) {
-      this.#menuManager.updateProps(this.#getMenuProps());
-    }
+  #isStaleProcessing(version) {
+    return version !== this.#processingVersion;
   }
 
-  #injectToggleButton(ytControls) {
-    const kissControls = document.createElement("div");
-    kissControls.className = "notranslate kiss-subtitle-controls";
-    Object.assign(kissControls.style, {
-      height: "100%",
-      position: "relative",
-    });
-
-    const toggleButton = document.createElement("button");
-    toggleButton.className = "ytp-button kiss-subtitle-button";
-    toggleButton.title = APP_NAME;
-
-    toggleButton.appendChild(createLogoSVG());
-    kissControls.appendChild(toggleButton);
-
-    // 使用新的 DomManager 替代 ShadowDomManager
-    this.#menuManager = new DomManager({
-      id: "kiss-subtitle-menus",
-      className: "notranslate",
-      reactComponent: Menus,
-      rootElement: kissControls,
-      props: this.#getMenuProps(), // 获取菜单 props
-    });
-
-    toggleButton.onclick = () => {
-      if (!this.#isMenuShow) {
-        this.#isMenuShow = true;
-        this.#toggleButton?.replaceChildren(
-          createLogoSVG({ isSelected: true })
-        );
-        this.#menuManager.show();
-        this.#updateMenuProps(); // 显示时更新 props
-      } else {
-        this.#isMenuShow = false;
-        this.#toggleButton?.replaceChildren(createLogoSVG());
-        this.#menuManager.hide();
-      }
-    };
-    this.#toggleButton = toggleButton;
-
-    ytControls?.prepend(kissControls);
-  }
-
-  #isSameLang(lang1, lang2) {
-    return lang1.slice(0, 2) === lang2.slice(0, 2);
-  }
-
-  // todo: 优化逻辑
-  #findCaptionTrack(captionTracks, lang) {
-    logger.debug("Youtube Provider: find caption track", {
-      captionTracks,
-      lang,
-    });
-
-    if (!captionTracks?.length) {
-      return null;
-    }
-
-    // 优先返回用户选择的 且非自动生成的 字幕轨
-    let captionTrack = captionTracks.find(
-      (item) => item.languageCode === lang && item.kind !== "asr"
-    );
-    if (!captionTrack) {
-      const asrTrack = captionTracks.find((item) => item.kind === "asr");
-      if (asrTrack) {
-        captionTrack = captionTracks.find(
-          (item) =>
-            item.kind !== "asr" &&
-            this.#isSameLang(item.languageCode, asrTrack.languageCode)
-        );
-        if (!captionTrack) {
-          captionTrack = asrTrack;
-        }
-      }
-    }
-
-    if (!captionTrack) {
-      captionTrack = captionTracks.pop();
-    }
-
-    return captionTrack;
-  }
-
-  async #getCaptionTracks(videoId) {
-    try {
-      const url = `https://www.youtube.com/watch?v=${videoId}`;
-      const html = await fetch(url).then((r) => r.text());
-      const match = html.match(/ytInitialPlayerResponse\s*=\s*(\{.*?\});/s);
-      if (!match) return [];
-      const data = JSON.parse(match[1]);
-      return data.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    } catch (err) {
-      logger.info("Youtube Provider: get captionTracks", err);
-    }
-  }
-
-  async #getSubtitleEvents(capUrl, potUrl, responseText) {
-    if (
-      !potUrl.searchParams.get("tlang") &&
-      potUrl.searchParams.get("kind") === capUrl.searchParams.get("kind") &&
-      this.#isSameLang(
-        potUrl.searchParams.get("lang"),
-        capUrl.searchParams.get("lang")
-      )
-    ) {
-      try {
-        const json = JSON.parse(responseText);
-        return json?.events;
-      } catch (err) {
-        logger.info("Youtube Provider: parse responseText", err);
-        return null;
-      }
-    }
-
-    try {
-      potUrl.searchParams.delete("tlang");
-      potUrl.searchParams.set("lang", capUrl.searchParams.get("lang"));
-      potUrl.searchParams.set("fmt", "json3");
-      if (capUrl.searchParams.get("kind")) {
-        potUrl.searchParams.set("kind", capUrl.searchParams.get("kind"));
-      } else {
-        potUrl.searchParams.delete("kind");
-      }
-
-      const res = await fetch(potUrl.href);
-      if (res?.ok) {
-        const json = await res.json();
-        return json?.events;
-      }
-      logger.info(`Youtube Provider: Failed to fetch subtitles: ${res.status}`);
-      return null;
-    } catch (error) {
-      logger.info("Youtube Provider: fetching subtitles error", error);
-      return null;
-    }
-  }
-
-  async #aiSegment({ videoId, fromLang, toLang, chunkEvents, segApiSetting }) {
-    try {
-      const events = chunkEvents.filter((item) => item.text);
-      const chunkSign = `${events[0].start} --> ${events[events.length - 1].end}`;
-      logger.debug("Youtube Provider: aiSegment events", {
-        videoId,
-        chunkSign,
-        fromLang,
-        toLang,
-        events,
-      });
-      const subtitles = await apiSubtitle({
-        videoId,
-        chunkSign,
-        fromLang,
-        toLang,
-        events,
-        apiSetting: segApiSetting,
-      });
-      logger.debug("Youtube Provider: aiSegment subtitles", subtitles);
-      if (Array.isArray(subtitles)) {
-        return subtitles;
-      }
-    } catch (err) {
-      logger.info("Youtube Provider: ai segmentation", err);
-    }
-
-    return [];
-  }
-
-  #getFromLang(lang) {
-    if (lang === "zh") {
-      return "zh-CN";
-    }
-
-    return (
-      OPT_LANGS_SPEC_DEFAULT.get(lang) ||
-      OPT_LANGS_SPEC_DEFAULT.get(lang.slice(0, 2)) ||
-      OPT_LANGS_TO_CODE[OPT_TRANS_MICROSOFT].get(lang) ||
-      OPT_LANGS_TO_CODE[OPT_TRANS_MICROSOFT].get(lang.slice(0, 2)) ||
-      "auto"
-    );
-  }
-
+  /**
+   * 处理页面注入脚本拦截到的 YouTube timedtext 请求。
+   * 该方法会校验视频与字幕轨、拉取原始字幕事件，并启动后续断句翻译流程。
+   *
+   * @private
+   * @param {string} url 被拦截到的 timedtext 请求 URL。
+   * @param {string} responseText 被拦截请求的响应文本。
+   * @returns {Promise<void>}
+   */
   async #handleInterceptedRequest(url, responseText) {
     const videoId = this.#videoId;
     if (!videoId) {
@@ -469,84 +449,166 @@ class YouTubeCaptionProvider {
     }
 
     const lang = potUrl.searchParams.get("lang");
-    const fromLang = this.#getFromLang(lang);
-    if (this.#flatEvents.length) {
-      if (this.#isSameLang(lang, this.#fromLang)) {
-        logger.debug("Youtube Provider: video was processed:", videoId);
-        return;
-      }
-      this.#destroyManager();
-    }
-
-    if (videoId === this.#processingId) {
-      logger.debug("Youtube Provider: video is processing:", videoId);
+    if (!lang) {
+      logger.debug("Youtube Provider: timedtext lang not found:", url);
       return;
     }
 
-    this.#processingId = videoId;
+    const interceptedKind = potUrl.searchParams.get("kind") || null;
+    const trackKey = buildTrackKey(potUrl);
+    const fromLang = getFromLang(lang);
+
+    if (this.#flatEvents.length && trackKey === this.#activeTrackKey) {
+      logger.debug("Youtube Provider: track was processed:", trackKey);
+      return;
+    }
+
+    if (this.#processingId === trackKey) {
+      logger.debug("Youtube Provider: track is processing:", trackKey);
+      return;
+    }
+
+    const processingVersion = (this.#processingVersion += 1);
+    this.#processingId = trackKey;
+    this.#subtitleAbortController?.abort();
+    this.#subtitleAbortController = new AbortController();
+
+    if (this.#flatEvents.length) {
+      this.#destroyManager();
+      clearMsgHistory(this.#setting.apiSlug);
+      this.#subtitles = [];
+      this.#events = [];
+      this.#rawSubtitleEvents = [];
+      this.#flatEvents = [];
+      this.#progressed = 0;
+      this.#activeTrackKey = null;
+    }
 
     try {
-      this.#showNotification(this.#i18n("starting_to_process_subtitle"));
+      this.#playerUi.showNotification(
+        this.#i18n("starting_to_process_subtitle")
+      );
 
       const { toLang } = this.#setting;
-      const captionTracks = await this.#getCaptionTracks(videoId);
-      const captionTrack = this.#findCaptionTrack(captionTracks, lang);
+      const { captionTracks, fullDescription } =
+        await getCaptionTracks(videoId);
+      if (this.#isStaleProcessing(processingVersion)) return;
+
+      this.#fullDescription = fullDescription || "";
+      const captionTrack = findCaptionTrack(
+        captionTracks,
+        lang,
+        interceptedKind
+      );
       if (!captionTrack) {
         logger.debug("Youtube Provider: CaptionTrack not found:", videoId);
         return;
       }
-
+      if (!captionTrack.baseUrl.startsWith("https")) {
+        captionTrack.baseUrl = window.location.origin + captionTrack.baseUrl;
+      }
       const capUrl = new URL(captionTrack.baseUrl);
-      const events = await this.#getSubtitleEvents(
-        capUrl,
-        potUrl,
-        responseText
-      );
+      const events = await getSubtitleEvents(capUrl, potUrl, responseText);
+      if (this.#isStaleProcessing(processingVersion)) return;
+
       if (!events?.length) {
         logger.debug("Youtube Provider: events not got:", videoId);
         return;
       }
+      this.#rawSubtitleEvents = events;
 
       logger.debug(
         `Youtube Provider: lang: ${lang}, fromLang: ${fromLang}, toLang: ${toLang}`
       );
-      if (this.#isSameLang(fromLang, toLang)) {
+      if (isSameLang(fromLang, toLang)) {
         logger.debug("Youtube Provider: skip same lang", fromLang, toLang);
-        this.#showNotification(this.#i18n("subtitle_same_lang"));
+        this.#playerUi.showNotification(this.#i18n("subtitle_same_lang"));
         return;
       }
 
-      const flatEvents = this.#genFlatEvents(events);
+      const subtitleEvents = normalizeTimedTextEvents(events);
+      const flatEvents = genFlatEvents(subtitleEvents);
       if (!flatEvents?.length) {
         logger.debug("Youtube Provider: flatEvents not got:", videoId);
         return;
       }
+      if (this.#isStaleProcessing(processingVersion)) return;
 
-      this.#events = events;
+      this.#events = subtitleEvents;
       this.#flatEvents = flatEvents;
       this.#fromLang = fromLang;
+      this.#activeTrackKey = trackKey;
+      this.#docInfo = getDocInfo();
+      await this.#enrichDocInfoWithAI(flatEvents, processingVersion);
+      if (this.#isStaleProcessing(processingVersion)) return;
 
       this.#processEvents({
         videoId,
         flatEvents,
         fromLang,
+        processingVersion,
+        signal: this.#subtitleAbortController.signal,
       });
     } catch (error) {
       logger.warn("Youtube Provider: handle subtitle", error);
-      this.#showNotification(this.#i18n("subtitle_load_failed"));
+      this.#playerUi.showNotification(this.#i18n("subtitle_load_failed"));
     } finally {
-      this.#processingId = null;
+      if (
+        !this.#isStaleProcessing(processingVersion) &&
+        this.#processingId === trackKey
+      ) {
+        this.#processingId = null;
+      }
     }
   }
 
-  async #processEvents({ videoId, flatEvents, fromLang }) {
+  /**
+   * 核心断句分句渲染调度器。
+   * 负责将展平后的 flatEvents 传递给断句流程，并启动 BilingualSubtitleManager 实例。
+   *
+   * @private
+   * @param {object} param0 参数对象。
+   * @param {string} param0.videoId 当前视频 ID。
+   * @param {Array<object>} param0.flatEvents 展平清洗后的单词节点流。
+   * @param {string} param0.fromLang 字幕源语言代码。
+   * @param {number} param0.processingVersion 当前异步任务的版本号快照。
+   * @returns {Promise<void>}
+   */
+  async #processEvents({
+    videoId,
+    flatEvents,
+    fromLang,
+    processingVersion,
+    signal,
+  }) {
     try {
-      const [subtitles, progressed] = await this.#eventsToSubtitles({
+      const [subtitles, progressed] = await eventsToSubtitles({
         videoId,
+        events: this.#events,
         flatEvents,
         fromLang,
+        setting: this.#setting,
+        processingVersion,
+        isStaleProcessing: (version) => this.#isStaleProcessing(version),
+        showNotification: (message, duration) =>
+          this.#playerUi.showNotification(message, duration),
+        i18n: this.#i18n,
+        apiSubtitle,
+        docInfo: this.#docInfo,
+        builtinSegment,
+        formatSubtitles: (events, lang) =>
+          formatSubtitles(events, lang, {
+            longSentenceThreshold: this.#setting.longSentenceThreshold,
+          }),
+        onAppendSubtitles: ({ subtitles, progressed }) => {
+          this.#appendProcessedSubtitles(subtitles, progressed);
+        },
+        getCurrentVideoId: () => this.#videoId,
+        signal,
       });
-      if (!subtitles?.length) {
+      if (this.#isStaleProcessing(processingVersion)) return;
+
+      if (!subtitles?.length && !this.#subtitles.length) {
         logger.debug(
           "Youtube Provider: events to subtitles got empty",
           videoId
@@ -563,16 +625,87 @@ class YouTubeCaptionProvider {
         return;
       }
 
-      this.#subtitles = subtitles;
-      this.#progressed = progressed;
-
+      const managedSubtitles = this.#upsertProcessedSubtitles(
+        subtitles,
+        progressed
+      );
       this.#startManager();
+      this.#managerInstance?.repairChunkTranslations(managedSubtitles);
     } catch (error) {
+      if (error?.name === "AbortError") return;
       logger.info("Youtube Provider: process events", error);
-      this.#showNotification(this.#i18n("subtitle_load_failed"));
+      this.#playerUi.showNotification(this.#i18n("subtitle_load_failed"));
     }
   }
 
+  /**
+   * 按时间轴合并已经处理出的字幕句子，并同步进度。
+   *
+   * @private
+   * @param {Array<object>} subtitles 新返回的字幕条目。
+   * @param {number} progressed 后台处理进度百分比。
+   * @returns {Array<object>} 本次新增的字幕条目。
+   */
+  #upsertProcessedSubtitles(subtitles, progressed) {
+    if (!subtitles?.length) {
+      this.#progressed = progressed;
+      return [];
+    }
+
+    const existed = new Map(
+      this.#subtitles.map((sub, index) => [`${sub.start}:${sub.end}`, index])
+    );
+    const changed = [];
+
+    for (const subtitle of subtitles) {
+      const key = `${subtitle.start}:${subtitle.end}`;
+      const index = existed.get(key);
+      if (index !== undefined) {
+        // 完整 chunk 回来时用最终结果覆盖同一时间轴句子，保留数组引用给 manager/list 使用。
+        this.#subtitles[index] = { ...this.#subtitles[index], ...subtitle };
+        changed.push(this.#subtitles[index]);
+      } else {
+        existed.set(key, this.#subtitles.length);
+        this.#subtitles.push(subtitle);
+        changed.push(subtitle);
+      }
+    }
+
+    this.#subtitles.sort((a, b) => a.start - b.start);
+    this.#progressed = progressed;
+    return changed;
+  }
+
+  /**
+   * 合并后台 AI 分块返回的字幕，并同步增量渲染到播放器与字幕列表。
+   *
+   * @private
+   * @param {Array<object>} subtitles 当前分块生成的字幕条目。
+   * @param {number} progressed 后台处理进度百分比。
+   * @returns {void}
+   */
+  #appendProcessedSubtitles(subtitles, progressed) {
+    const managedSubtitles = this.#upsertProcessedSubtitles(
+      subtitles,
+      progressed
+    );
+
+    if (!this.#managerInstance && this.#subtitles.length) {
+      // 首个流式句子到达时立即启动字幕管理器，不再等待整个 AI chunk 返回。
+      this.#startManager();
+    }
+
+    this.#managerInstance?.appendSubtitles(managedSubtitles);
+    this.#subtitleListManager?.setBilingualSubtitles(this.#subtitles);
+    this.#managerInstance?.repairChunkTranslations(managedSubtitles);
+  }
+
+  /**
+   * 当用户更改了断句设置时，触发对现有字幕的重新处理与渲染。
+   *
+   * @private
+   * @returns {void}
+   */
   #reProcessEvents() {
     this.#progressed = 0;
     this.#subtitles = [];
@@ -584,70 +717,120 @@ class YouTubeCaptionProvider {
       return;
     }
 
-    this.#showNotification(this.#i18n("starting_reprocess_events"));
+    this.#playerUi.showNotification(this.#i18n("starting_reprocess_events"));
 
+    const processingVersion = (this.#processingVersion += 1);
+    this.#subtitleAbortController?.abort();
+    this.#subtitleAbortController = new AbortController();
     this.#destroyManager();
+    clearMsgHistory(this.#setting.apiSlug);
 
-    this.#processEvents({ videoId, flatEvents, fromLang });
+    this.#processEvents({
+      videoId,
+      flatEvents,
+      fromLang,
+      processingVersion,
+      signal: this.#subtitleAbortController.signal,
+    });
   }
 
-  async #eventsToSubtitles({ videoId, flatEvents, fromLang }) {
-    const { segSlug, transApis, chunkLength, toLang } = this.#setting;
-    const subtitlesFallback = () => [
-      this.#formatSubtitles(flatEvents, fromLang),
-      100,
-    ];
+  /**
+   * 异步调用 AI 总结 API，提取视频的专有名词、主要大意及语境背景。
+   * 提取的信息会保存在 docInfo.summary 中，为之后的翻译步骤提供上下文提示。
+   *
+   * @private
+   * @param {Array<object>} flatEvents 展平后的原始字幕单词节点流。
+   * @param {number} processingVersion 当前异步生命周期版本号。
+   * @returns {Promise<void>}
+   */
+  async #enrichDocInfoWithAI(flatEvents, processingVersion) {
+    const { aiContextSlug, transApis } = this.#setting;
 
-    // 根据segSlug从transApis中查找对应的API设置
-    const segApiSetting = transApis?.find((api) => api.apiSlug === segSlug);
+    if (!aiContextSlug || aiContextSlug === "-") return;
+    if (this.#isStaleProcessing(processingVersion)) return;
 
-    // potUrl.searchParams.get("kind") === "asr"
-    // 当segSlug不为"-"且segApiSetting存在时，启用AI断句
-    if (segSlug && segSlug !== "-" && segApiSetting) {
-      logger.info("Youtube Provider: Starting AI ...");
-      this.#showNotification(this.#i18n("ai_processing_pls_wait"));
+    const contextApiSetting = transApis?.find(
+      (api) => api.apiSlug === aiContextSlug
+    );
+    if (!contextApiSetting) return;
+    if (!API_SPE_TYPES.ai.has(contextApiSetting.apiType)) return;
 
-      const eventChunks = this.#splitEventsIntoChunks(flatEvents, chunkLength);
+    const transcript = flatEvents
+      .map((e) => e.text)
+      .filter(Boolean)
+      .join(" ")
+      .slice(0, 8000);
 
-      if (eventChunks.length === 0) {
-        return subtitlesFallback();
-      }
+    if (transcript.length < 200) return;
 
-      const firstChunkEvents = eventChunks[0];
-      const firstBatchSubtitles = await this.#aiSegment({
+    const videoId = this.#videoId;
+    const docInfo = this.#docInfo;
+
+    try {
+      this.#playerUi.showNotification(this.#i18n("ai_context_analyzing"));
+
+      const summary = await apiSummarizeContext({
         videoId,
-        chunkEvents: firstChunkEvents,
-        fromLang,
-        toLang,
-        segApiSetting,
+        title: docInfo.title,
+        description: this.#fullDescription || docInfo.description,
+        transcript,
+        apiSetting: contextApiSetting,
       });
 
-      if (!firstBatchSubtitles?.length) {
-        return subtitlesFallback();
+      if (
+        summary &&
+        videoId === this.#videoId &&
+        !this.#isStaleProcessing(processingVersion)
+      ) {
+        docInfo.summary = summary;
       }
-
-      if (eventChunks.length > 1) {
-        const remainingChunks = eventChunks.slice(1);
-        this.#processRemainingChunksAsync({
-          chunks: remainingChunks,
-          videoId,
-          fromLang,
-          toLang,
-          segApiSetting,
-        });
-
-        const processed = Math.floor(100 / eventChunks.length);
-
-        return [firstBatchSubtitles, processed];
-      } else {
-        return [firstBatchSubtitles, 100];
-      }
+    } catch (err) {
+      logger.info("Youtube Provider: AI context enrichment failed", err);
     }
-
-    return subtitlesFallback();
   }
 
+  /**
+   * 当用户更改了 AI 上下文引擎配置时，清空当前大纲记忆，并带上新上下文重新处理字幕事件。
+   *
+   * @private
+   * @returns {Promise<void>}
+   */
+  async #reProcessEventsWithContext() {
+    this.#progressed = 0;
+    this.#subtitles = [];
+
+    const videoId = this.#videoId;
+    const flatEvents = this.#flatEvents;
+    if (!videoId || !flatEvents.length) return;
+
+    const processingVersion = (this.#processingVersion += 1);
+    this.#subtitleAbortController?.abort();
+    this.#subtitleAbortController = new AbortController();
+    this.#destroyManager();
+    clearMsgHistory(this.#setting.apiSlug);
+    this.#docInfo = getDocInfo();
+    await this.#enrichDocInfoWithAI(flatEvents, processingVersion);
+    if (this.#isStaleProcessing(processingVersion)) return;
+    this.#processEvents({
+      videoId,
+      flatEvents,
+      fromLang: this.#fromLang,
+      processingVersion,
+      signal: this.#subtitleAbortController.signal,
+    });
+  }
+
+  /**
+   * 实例化双语字幕渲染管理器，并在页面和侧边栏初始化显示。
+   *
+   * @private
+   * @returns {void}
+   */
   #startManager() {
+    if (!this.#isYtSubtitleEnabled()) {
+      return;
+    }
+
     if (this.#managerInstance) {
       return;
     }
@@ -657,7 +840,7 @@ class YouTubeCaptionProvider {
     }
 
     if (!this.#subtitles.length) {
-      this.#showNotification(this.#i18n("waitting_for_subtitle"));
+      this.#playerUi.showNotification(this.#i18n("waitting_for_subtitle"));
       return;
     }
 
@@ -672,51 +855,45 @@ class YouTubeCaptionProvider {
     this.#managerInstance = new BilingualSubtitleManager({
       videoEl,
       formattedSubtitles: this.#subtitles,
-      setting: { ...this.#setting, fromLang: this.#fromLang },
+      setting: {
+        ...this.#setting,
+        fromLang: this.#fromLang,
+        docInfo: this.#docInfo,
+      },
     });
 
-    // todo 移到菜单切换
-    // 监听字幕更新事件，将翻译后的字幕传递给字幕列表
-    const enhanceMode = this.#setting.enhanceMode ?? "mobile_off";
-    const isEnhance =
-      enhanceMode === OPT_ENHANCE_ON ||
-      (enhanceMode === OPT_ENHANCE_MOBILE_OFF && !isMobile);
-    const showList = this.#setting.showList ?? true;
+    const showList = isSubtitleModeEnabled(
+      this.#setting.showList,
+      this.#setting.enhanceMode
+    );
 
-    if (isEnhance && showList && !this.#subtitleListManager) {
-      // 初始化字幕列表管理器
+    if (showList && !this.#subtitleListManager) {
       this.#subtitleListManager = new YouTubeSubtitleList(videoEl);
-      this.#subtitleListManager.initialize(this.#subtitles);
+      this.#subtitleListManager.initialize(
+        this.#subtitles,
+        this.#rawSubtitleEvents
+      );
 
-      // todo: 将 subtitleListManager 实例传入 managerInstance
-      // 监听字幕更新事件，在字幕翻译完成后更新字幕列表
-      this.#managerInstance.onSubtitleUpdate = (updatedSubtitles) => {
-        this.#subtitleListManager.setBilingualSubtitles(updatedSubtitles);
+      this.#managerInstance.onSubtitleUpdate = (subtitleUpdate) => {
+        this.#subtitleListManager.updateSingleSubtitle(subtitleUpdate);
       };
 
-      // 创建包含翻译信息的双语字幕数据（初始可能没有翻译）
-      const bilingualSubtitles = this.#subtitles.map((sub) => ({
-        start: sub.start,
-        end: sub.end,
-        text: sub.text,
-        translation: sub.translation || "",
-      }));
-
-      // 将双语字幕数据传递给字幕列表
-      this.#subtitleListManager.setBilingualSubtitles(bilingualSubtitles);
-      // 启动字幕列表自动滚动
       this.#subtitleListManager.turnOnAutoSub();
     }
 
     this.#managerInstance.start();
-
-    this.#showNotification(this.#i18n("subtitle_load_succeed"));
-
-    this.#hideYtCaption();
+    this.#playerUi.showNotification(this.#i18n("subtitle_load_succeed"));
+    this.#playerUi.hideYtCaption();
   }
 
+  /**
+   * 销毁双语字幕管理器以及字幕侧边栏，恢复网页原生字幕展示状态。
+   *
+   * @private
+   * @returns {void}
+   */
   #destroyManager() {
-    this.#showYtCaption();
+    this.#playerUi.showYtCaption();
 
     if (!this.#managerInstance) {
       return;
@@ -724,437 +901,24 @@ class YouTubeCaptionProvider {
 
     logger.info("Youtube Provider: Destroying manager...");
 
+    this.#managerInstance.onSubtitleUpdate = null;
     this.#managerInstance.destroy();
     this.#managerInstance = null;
 
-    // 销毁字幕列表
     if (this.#subtitleListManager) {
       this.#subtitleListManager.destroy();
       this.#subtitleListManager = null;
     }
   }
-
-  #hideYtCaption() {
-    const ytCaption = document.querySelector(YT_CAPTION_SELECT);
-    ytCaption && (ytCaption.style.display = "none");
-  }
-
-  #showYtCaption() {
-    const ytCaption = document.querySelector(YT_CAPTION_SELECT);
-    ytCaption && (ytCaption.style.display = "block");
-  }
-
-  #formatSubtitles(flatEvents, lang) {
-    if (!flatEvents?.length) return [];
-
-    const noSpaceLanguages = [
-      "zh", // 中文
-      "ja", // 日文
-      "ko", // 韩文（现代用空格，但结构上仍可连写）
-      "th", // 泰文
-      "lo", // 老挝文
-      "km", // 高棉文
-      "my", // 缅文
-    ];
-
-    if (noSpaceLanguages.some((l) => lang?.startsWith(l))) {
-      const subtitles = [];
-
-      if (this.#isQualityPoor(flatEvents, 5, 0.5)) {
-        return flatEvents;
-      }
-
-      let currentLine = null;
-      const MAX_LENGTH = 30;
-
-      for (const segment of flatEvents) {
-        if (segment.text) {
-          if (!currentLine) {
-            currentLine = {
-              text: segment.text,
-              start: segment.start,
-              end: segment.end,
-            };
-          } else {
-            currentLine.text += segment.text;
-            currentLine.end = segment.end;
-          }
-
-          if (currentLine.text.length >= MAX_LENGTH) {
-            subtitles.push(currentLine);
-            currentLine = null;
-          }
-        } else {
-          if (currentLine) {
-            subtitles.push(currentLine);
-            currentLine = null;
-          }
-        }
-      }
-
-      if (currentLine) {
-        subtitles.push(currentLine);
-      }
-
-      return subtitles;
-    }
-
-    let subtitles = this.#processSubtitles({ flatEvents });
-    const isPoor = this.#isQualityPoor(subtitles);
-    logger.debug("Youtube Provider: isQualityPoor", { isPoor, subtitles });
-    if (isPoor) {
-      subtitles = this.#processSubtitles({ flatEvents, usePause: true });
-    }
-
-    return subtitles;
-  }
-
-  #isQualityPoor(lines, lengthThreshold = 250, percentageThreshold = 0.2) {
-    if (lines.length === 0) return false;
-    const longLinesCount = lines.filter(
-      (line) => line.text.length > lengthThreshold
-    ).length;
-    return longLinesCount / lines.length > percentageThreshold;
-  }
-
-  #processSubtitles({
-    flatEvents,
-    usePause = false,
-    timeout = 1000,
-    maxWords = 15,
-  } = {}) {
-    const groupedPauseWords = {
-      1: new Set([
-        "actually",
-        "also",
-        "although",
-        "and",
-        "anyway",
-        "as",
-        "basically",
-        "because",
-        "but",
-        "eventually",
-        "frankly",
-        "honestly",
-        "hopefully",
-        "however",
-        "if",
-        "instead",
-        "it's",
-        "just",
-        "let's",
-        "like",
-        "literally",
-        "maybe",
-        "meanwhile",
-        "nevertheless",
-        "nonetheless",
-        "now",
-        "okay",
-        "or",
-        "otherwise",
-        "perhaps",
-        "personally",
-        "probably",
-        "right",
-        "since",
-        "so",
-        "suddenly",
-        "that's",
-        "then",
-        "there's",
-        "therefore",
-        "though",
-        "thus",
-        "unless",
-        "until",
-        "well",
-        "while",
-      ]),
-      2: new Set([
-        "after all",
-        "at first",
-        "at least",
-        "even if",
-        "even though",
-        "for example",
-        "for instance",
-        "i believe",
-        "i guess",
-        "i mean",
-        "i suppose",
-        "i think",
-        "in fact",
-        "in the end",
-        "of course",
-        "then again",
-        "to be fair",
-        "you know",
-        "you see",
-      ]),
-      3: new Set([
-        "as a result",
-        "by the way",
-        "in other words",
-        "in that case",
-        "in this case",
-        "to be clear",
-        "to be honest",
-      ]),
-    };
-
-    const sentences = [];
-    let currentBuffer = [];
-    let bufferWordCount = 0;
-
-    const flushBuffer = () => {
-      if (currentBuffer.length > 0) {
-        sentences.push({
-          text: currentBuffer
-            .map((s) => s.text)
-            .join(" ")
-            .trim(),
-          start: currentBuffer[0].start,
-          end: currentBuffer[currentBuffer.length - 1].end,
-        });
-      }
-      currentBuffer = [];
-      bufferWordCount = 0;
-    };
-
-    flatEvents.forEach((segment) => {
-      if (!segment.text) return;
-
-      const lastSegment = currentBuffer[currentBuffer.length - 1];
-
-      if (lastSegment) {
-        const isEndOfSentence = /[.?!…\])]$/.test(lastSegment.text);
-        const isPauseOfSentence = /[,]$/.test(lastSegment.text);
-        const isTimeout = segment.start - lastSegment.end > timeout;
-        const isWordLimitExceeded =
-          (usePause || isPauseOfSentence) && bufferWordCount >= maxWords;
-
-        const startsWithSign = /^[[(♪]/.test(segment.text);
-        const startsWithPauseWord =
-          usePause &&
-          groupedPauseWords["1"].has(
-            segment.text.toLowerCase().split(" ")[0]
-          ) &&
-          currentBuffer.length > 1;
-
-        if (
-          isEndOfSentence ||
-          isTimeout ||
-          isWordLimitExceeded ||
-          startsWithSign ||
-          startsWithPauseWord
-        ) {
-          flushBuffer();
-        }
-      }
-
-      currentBuffer.push(segment);
-      bufferWordCount += segment.text.split(/\s+/).length;
-    });
-
-    flushBuffer();
-
-    return sentences;
-  }
-
-  #genFlatEvents(events = []) {
-    const segments = [];
-    let buffer = null;
-
-    events.forEach(({ segs = [], tStartMs = 0, dDurationMs = 0 }) => {
-      segs.forEach(({ utf8 = "", tOffsetMs = 0 }, j) => {
-        const text = utf8.trim().replace(/\s+/g, " ");
-        const start = tStartMs + tOffsetMs;
-
-        if (buffer) {
-          if (!buffer.end || buffer.end > start) {
-            buffer.end = start;
-          }
-          segments.push(buffer);
-          buffer = null;
-        }
-
-        buffer = {
-          text,
-          start,
-        };
-
-        if (j === segs.length - 1) {
-          buffer.end = tStartMs + dDurationMs;
-        }
-      });
-    });
-
-    segments.push(buffer);
-
-    return segments;
-  }
-
-  #splitEventsIntoChunks(flatEvents, chunkLength = 1000) {
-    if (!flatEvents || flatEvents.length === 0) {
-      return [];
-    }
-
-    const eventChunks = [];
-    let currentChunk = [];
-    let currentChunkTextLength = 0;
-    const MAX_CHUNK_LENGTH = chunkLength + 500;
-    const PAUSE_THRESHOLD_MS = 1000;
-
-    for (let i = 0; i < flatEvents.length; i++) {
-      const event = flatEvents[i];
-      currentChunk.push(event);
-      currentChunkTextLength += event.text.length;
-
-      const isLastEvent = i === flatEvents.length - 1;
-      if (isLastEvent) {
-        continue;
-      }
-
-      let shouldSplit = false;
-
-      if (currentChunkTextLength >= MAX_CHUNK_LENGTH) {
-        shouldSplit = true;
-      } else if (currentChunkTextLength >= chunkLength) {
-        const isEndOfSentence = /[.?!…\])]$/.test(event.text);
-        const nextEvent = flatEvents[i + 1];
-        const pauseDuration = nextEvent.start - event.end;
-        if (isEndOfSentence || pauseDuration > PAUSE_THRESHOLD_MS) {
-          shouldSplit = true;
-        }
-      }
-
-      if (shouldSplit) {
-        eventChunks.push(currentChunk);
-        currentChunk = [];
-        currentChunkTextLength = 0;
-      }
-    }
-
-    if (currentChunk.length > 0) {
-      eventChunks.push(currentChunk);
-    }
-
-    return eventChunks;
-  }
-
-  async #processRemainingChunksAsync({
-    chunks,
-    videoId,
-    fromLang,
-    toLang,
-    segApiSetting,
-  }) {
-    logger.info(`Youtube Provider: Starting for ${chunks.length} chunks.`);
-
-    for (let i = 0; i < chunks.length; i++) {
-      const chunkEvents = chunks[i];
-      const chunkNum = i + 2;
-      logger.debug(
-        `Youtube Provider: Processing subtitle chunk ${chunkNum}/${chunks.length + 1}: ${chunkEvents[0]?.start} --> ${chunkEvents[chunkEvents.length - 1]?.start}`
-      );
-
-      let subtitlesForThisChunk = [];
-
-      try {
-        const aiSubtitles = await this.#aiSegment({
-          videoId,
-          chunkEvents,
-          fromLang,
-          toLang,
-          segApiSetting,
-        });
-
-        if (aiSubtitles?.length > 0) {
-          subtitlesForThisChunk = aiSubtitles;
-        } else {
-          logger.debug(
-            `Youtube Provider: AI segmentation for chunk ${chunkNum} returned no data.`
-          );
-          subtitlesForThisChunk = this.#formatSubtitles(chunkEvents, fromLang);
-        }
-      } catch (chunkError) {
-        subtitlesForThisChunk = this.#formatSubtitles(chunkEvents, fromLang);
-      }
-
-      if (videoId !== this.#videoId) {
-        logger.info(
-          "Youtube Provider: videoId changed!!",
-          videoId,
-          this.#videoId
-        );
-        break;
-      }
-
-      if (subtitlesForThisChunk.length > 0) {
-        const progressed = Math.floor((chunkNum * 100) / (chunks.length + 1));
-        this.#subtitles.push(...subtitlesForThisChunk);
-        this.#subtitles.sort((a, b) => a.start - b.start);
-        this.#progressed = progressed;
-
-        logger.debug(
-          `Youtube Provider: Appending ${subtitlesForThisChunk.length} subtitles from chunk ${chunkNum} (${this.#progressed}%).`
-        );
-
-        if (this.#managerInstance) {
-          this.#managerInstance.appendSubtitles(subtitlesForThisChunk);
-        }
-      } else {
-        logger.debug(`Youtube Provider: Chunk ${chunkNum} no subtitles.`);
-      }
-
-      await sleep(randomBetween(500, 1000));
-    }
-
-    logger.info("Youtube Provider: All subtitle chunks processed.");
-  }
-
-  #createNotificationElement() {
-    const notificationEl = document.createElement("div");
-    notificationEl.className = "kiss-notification";
-    Object.assign(notificationEl.style, {
-      position: "absolute",
-      top: "40%",
-      left: "50%",
-      transform: "translateX(-50%)",
-      background: "rgba(0,0,0,0.7)",
-      color: "red",
-      padding: "0.5em 1em",
-      borderRadius: "4px",
-      zIndex: "2147483647",
-      opacity: "0",
-      transition: "opacity 0.3s ease-in-out",
-      pointerEvents: "none",
-      fontSize: "2em",
-      width: "50%",
-      textAlign: "center",
-    });
-
-    const videoEl = this.#videoEl;
-    const videoContainer = videoEl?.parentElement?.parentElement;
-    if (videoContainer) {
-      videoContainer.appendChild(notificationEl);
-      this.#notificationEl = notificationEl;
-    }
-  }
-
-  #showNotification(message, duration = 2000) {
-    if (!this.#notificationEl) this.#createNotificationElement();
-    this.#notificationEl.textContent = message;
-    this.#notificationEl.style.opacity = "1";
-    clearTimeout(this.#notificationTimeout);
-    this.#notificationTimeout = setTimeout(() => {
-      this.#notificationEl.style.opacity = "0";
-    }, duration);
-  }
 }
 
+/**
+ * YouTube 字幕模块的单例初始化入口。
+ * 多次调用只会创建一个 provider，避免重复注册页面监听器和重复注入控制按钮。
+ *
+ * @param {object} setting 字幕模块运行配置。
+ * @returns {Promise<void>}
+ */
 export const YouTubeInitializer = (() => {
   let initialized = false;
 

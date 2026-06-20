@@ -36,6 +36,7 @@ import {
   defaultSubtitlePrompt,
   defaultNobatchPrompt,
   defaultNobatchUserPrompt,
+  defaultDictUserPrompt,
   INPUT_PLACE_TONE,
   INPUT_PLACE_TITLE,
   INPUT_PLACE_DESCRIPTION,
@@ -45,6 +46,8 @@ import {
   defaultSystemPromptXml,
   defaultSystemPromptLines,
   INPUT_PLACE_SUMMARY,
+  INPUT_PLACE_CONTEXT,
+  THINKING_PARAM_MAP,
 } from "../config";
 import { msAuth } from "../libs/auth";
 import { genDeeplFree } from "./deepl";
@@ -56,9 +59,12 @@ import {
   stripMarkdownCodeBlock,
   parseAITerms,
 } from "../libs/utils";
+import { decodeHTMLEntities } from "../libs/html";
 import {
   parseStreamingSegments,
   createStreamingJsonParser,
+  createStreamingSubtitleParser,
+  createRealtimeStreamParser,
   detectStreamFormat,
   getStreamDelta,
 } from "../libs/stream";
@@ -67,11 +73,14 @@ import { fetchData, fetchStream } from "../libs/fetch";
 import { getMsgHistory } from "./history";
 import { parseBilingualVtt } from "../subtitle/vtt";
 import { getDocInfo } from "../libs/docInfo";
+import { trustedTypesHelper } from "../libs/trustedTypes";
 
 const keyMap = new Map();
 const urlMap = new Map();
 
 // 轮询key/url
+// 轮询 Key / URL 负载均衡。
+// 用于在配置了多个 API 密钥或自定义 URL 端点时，分摊频率并降低单 Key 被限流限额的风险。
 const keyPick = (apiSlug, key = "", cacheMap) => {
   const keys = key
     .split(/\n|,/)
@@ -82,6 +91,7 @@ const keyPick = (apiSlug, key = "", cacheMap) => {
     return "";
   }
 
+  // 从轮询缓存 cacheMap 中提取上一次使用的 Index，计算本次轮询的 Index 并写回缓存
   const preIndex = cacheMap.get(apiSlug) ?? -1;
   const curIndex = (preIndex + 1) % keys.length;
   cacheMap.set(apiSlug, curIndex);
@@ -89,6 +99,9 @@ const keyPick = (apiSlug, key = "", cacheMap) => {
   return keys[curIndex];
 };
 
+/**
+ * 依据配置参数和当前页面元数据生成大模型 Prompt 系统指示。
+ */
 const genSystemPrompt = ({
   systemPrompt,
   tone,
@@ -97,12 +110,13 @@ const genSystemPrompt = ({
   fromLang,
   toLang,
   texts,
-  docInfo: { title = "", description = "", summary = "" } = {},
+  docInfo: { title = "", description = "", summary = "", context = "" } = {},
 }) =>
-  systemPrompt
+  String(systemPrompt || "")
     .replaceAll(INPUT_PLACE_TITLE, title)
     .replaceAll(INPUT_PLACE_DESCRIPTION, description)
     .replaceAll(INPUT_PLACE_SUMMARY, summary)
+    .replaceAll(INPUT_PLACE_CONTEXT, context)
     .replaceAll(INPUT_PLACE_TONE, tone)
     .replaceAll(INPUT_PLACE_FROM, from)
     .replaceAll(INPUT_PLACE_TO, to)
@@ -121,7 +135,7 @@ const genUserPrompt = ({
   fromLang,
   toLang,
   texts,
-  docInfo: { title = "", description = "", summary = "" } = {},
+  docInfo: { title = "", description = "", summary = "", context = "" } = {},
 }) => {
   if (useBatchFetch) {
     const promptObj = {
@@ -144,10 +158,11 @@ const genUserPrompt = ({
     return JSON.stringify(promptObj);
   }
 
-  return nobatchUserPrompt
+  return String(nobatchUserPrompt || "")
     .replaceAll(INPUT_PLACE_TITLE, title)
     .replaceAll(INPUT_PLACE_DESCRIPTION, description)
     .replaceAll(INPUT_PLACE_SUMMARY, summary)
+    .replaceAll(INPUT_PLACE_CONTEXT, context)
     .replaceAll(INPUT_PLACE_TONE, tone)
     .replaceAll(INPUT_PLACE_FROM, from)
     .replaceAll(INPUT_PLACE_TO, to)
@@ -170,7 +185,7 @@ const genSubtitlePrompt = ({
   const glossaryStr = Object.entries(aiGlossary)
     .map(([term, definition]) => `- ${term}: ${definition}`)
     .join("\n");
-  return subtitlePrompt
+  return String(subtitlePrompt || "")
     .replaceAll(INPUT_PLACE_TITLE, title)
     .replaceAll(INPUT_PLACE_DESCRIPTION, description)
     .replaceAll(INPUT_PLACE_SUMMARY, summary)
@@ -182,36 +197,59 @@ const genSubtitlePrompt = ({
     .replaceAll(INPUT_PLACE_TO_LANG, toLang);
 };
 
+const normalizeSubtitleContext = (text) =>
+  String(text ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 400);
+
+const buildSubtitleUserPrompt = ({
+  formattedEvents,
+  prevContext = "",
+  nextContext = "",
+}) => {
+  const mainInput = JSON.stringify(formattedEvents);
+  const prev = normalizeSubtitleContext(prevContext);
+  const next = normalizeSubtitleContext(nextContext);
+  if (!prev && !next) return mainInput;
+  const sections = [];
+  if (prev) {
+    sections.push(
+      `[Previous context (read-only, do NOT segment)]\n${JSON.stringify(prev)}`
+    );
+  }
+  sections.push(`[Main input]\n${mainInput}`);
+  if (next) {
+    sections.push(
+      `[Next context (read-only, do NOT segment)]\n${JSON.stringify(next)}`
+    );
+  }
+  return sections.join("\n\n");
+};
+
+/**
+ * 强健的大模型翻译结果解析器 (AI Response Robust Parser)。
+ * 完美解决大模型在翻译时常混杂的 Markdown、未闭合 JSON、XML、数字列表及无规换行文本的纠错与规避问题。
+ * @param {string} raw 大模型返回的原始字符串内容
+ * @param {boolean} useBatchFetch 是否为批量翻译模式
+ * @returns {Array<[string, string]>} 解析后的双元组列表 [译文, 源语言检测结果]
+ */
 const parseAIRes = (raw, useBatchFetch = true) => {
   if (!raw) {
     return [];
   }
 
+  // 纯覆盖单段模式，直接包装返回
   if (!useBatchFetch) {
     return [[raw]];
   }
 
-  // try {
-  //   const jsonString = extractJson(raw);
-  //   if (!jsonString) return [];
-
-  //   const data = JSON.parse(jsonString);
-  //   if (Array.isArray(data.translations)) {
-  //     // todo: 考虑序号id可能会打乱
-  //     return data.translations.map((item) => [
-  //       item?.text ?? "",
-  //       item?.sourceLanguage ?? "",
-  //     ]);
-  //   }
-  // } catch (err) {
-  //   kissLog("parse AI Res", err);
-  // }
-  // return [];
-
+  // 剥离 Markdown 常用的 ```json...``` 代码块包裹
   let content = stripMarkdownCodeBlock(raw).trim();
 
-  // JSON
+  // 1. 尝试以 JSON 格式提取与纠错
   try {
+    // 查找 JSON 有效的起始与结束位置，能过滤掉 JSON 块前后的引导语或杂音文本
     const start = content.search(/(\{|\[)/);
     const end = content.lastIndexOf(content.includes("}") ? "}" : "]");
 
@@ -228,21 +266,24 @@ const parseAIRes = (raw, useBatchFetch = true) => {
         (list[0].text !== undefined || list[0].translations)
       ) {
         return list.map((item) => [
-          String(item.text || ""),
+          decodeHTMLEntities(String(item.text || "")),
           String(item.sourceLanguage || ""),
         ]);
       }
     }
   } catch (e) {
-    //
+    // 忽略异常，平滑降级到 XML 尝试
   }
 
-  // XML
+  // 2. 尝试以 XML 标签格式解析 (如 <t>...</t> 或 <seg>...</seg> 块)
   const xmlTagPattern = /<(t|item|seg)\b/i;
   if (xmlTagPattern.test(content)) {
     try {
       const parser = new DOMParser();
-      const doc = parser.parseFromString(content, "text/html");
+      const doc = parser.parseFromString(
+        trustedTypesHelper.createHTML(content),
+        "text/html"
+      );
       const elements = doc.querySelectorAll("t, item, seg");
 
       if (elements.length > 0) {
@@ -252,30 +293,111 @@ const parseAIRes = (raw, useBatchFetch = true) => {
         ]);
       }
     } catch (e) {
-      //
+      // 忽略，降级到纯文本多级备用
     }
   }
 
-  // 纯文本换行
+  // 3. 兜底策略：纯文本单行/带序号和管道符按行切割解析 (例如 "1 | 译文" 格式)
   return content.split("\n").map((line) => {
     const pipeMatch = line.match(/^\d+\s*\|\s*(.*)/);
     if (pipeMatch) {
-      return [pipeMatch[1].trim(), ""];
+      return [decodeHTMLEntities(pipeMatch[1].trim()), ""];
     }
 
-    const text = line.replace(/<br\s*\/?>/gi, "\n").trim();
+    const text = decodeHTMLEntities(line.replace(/<br\s*\/?>/gi, "\n").trim());
     return [text, ""];
   });
 };
 
-const parseSTRes = (raw) => {
+/**
+ * 依据时间差计算字幕中发生的句子停顿断句等级。
+ */
+const getPauseLevel = (gapMs) => {
+  if (!Number.isFinite(gapMs) || gapMs <= 300) return 0;
+  if (gapMs <= 600) return 1;
+  if (gapMs <= 1200) return 2;
+  return 3;
+};
+
+const formatIndexSubtitleEvents = (events) =>
+  events.map((e, i) => {
+    const item = { id: i, text: e.text };
+    if (i > 0) {
+      const p = getPauseLevel(e.start - events[i - 1].end);
+      if (p) item.p = p;
+    }
+    return item;
+  });
+
+const usesIndexSubtitleInput = (prompt = "") => {
+  if (/\{\s*["']?s["']?\s*:/.test(prompt) && /\bid\b/i.test(prompt))
+    return true;
+  if (/WEBVTT|MM:SS\.mmm|-->/i.test(prompt)) return false;
+  return false;
+};
+
+const geminiText = (parts) =>
+  Array.isArray(parts)
+    ? parts
+        .filter((p) => !p.thought && p.text)
+        .map((p) => p.text)
+        .join("")
+    : "";
+
+const parseIndexSubtitleRes = (raw, events) => {
+  const buildResult = (data) => {
+    if (!Array.isArray(data) || !data.length) return null;
+    const result = [];
+    for (const seg of data) {
+      const s = Number(seg.s ?? seg.start_id);
+      const e = Number(seg.e ?? seg.end_id);
+      if (!Number.isInteger(s) || !Number.isInteger(e)) continue;
+      const startIdx = Math.max(0, Math.min(s, events.length - 1));
+      const endIdx = Math.max(startIdx, Math.min(e, events.length - 1));
+      result.push({
+        start: events[startIdx].start,
+        end: events[endIdx].end,
+        text: String(seg.o ?? seg.original ?? ""),
+        translation: String(seg.t ?? seg.translation ?? ""),
+        _si: s,
+        _ei: e,
+      });
+    }
+    return result.length ? result : null;
+  };
+
+  const stripped = stripMarkdownCodeBlock(String(raw ?? "")).trim();
+  // AI 有时在 JSON 值以 >> 开头时丢掉冒号和引号: "o">> → "o":">>
+  const repaired = stripped.replace(/"([a-z_]+)">>/g, '"$1":">>');
+
+  try {
+    return buildResult(JSON.parse(repaired));
+  } catch {
+    try {
+      const last = Math.max(
+        repaired.lastIndexOf("},"),
+        repaired.lastIndexOf("}\n"),
+        repaired.lastIndexOf("}\r")
+      );
+      if (last < 0) return null;
+      return buildResult(JSON.parse(repaired.slice(0, last + 1) + "]"));
+    } catch {
+      return null;
+    }
+  }
+};
+
+const parseSTRes = (raw, events = null) => {
   if (!raw) {
     return [];
   }
 
+  if (events?.length) {
+    const indexed = parseIndexSubtitleRes(raw, events);
+    if (indexed) return indexed;
+  }
+
   try {
-    // const jsonString = extractJson(raw);
-    // const data = JSON.parse(jsonString);
     const data = parseBilingualVtt(raw);
     if (Array.isArray(data)) {
       return data;
@@ -285,6 +407,70 @@ const parseSTRes = (raw) => {
   }
 
   return [];
+};
+
+const siliconflowEffortMap = {
+  max: 32768,
+  high: 16384,
+  medium: 8192,
+  low: 4096,
+  minimal: 2048,
+};
+
+/**
+ * 注入推理模式（Thinking）的专用控制参数。
+ * 针对 DeepSeek, 阿里百炼, 硅基流动, Cerebras, OpenRouter 各大模型厂商繁杂的推理链配置参数进行统一映射注入。
+ */
+const injectThinking = (body, { apiType, thinkingMode, thinkingEffort }) => {
+  if (thinkingMode === "auto") return; // 留空由模型网关自动决定
+
+  const param = THINKING_PARAM_MAP[apiType];
+  if (!param) return;
+
+  const hasEffort = thinkingEffort && thinkingEffort !== "_default";
+
+  switch (param.type) {
+    case "deepseek":
+      body.thinking = {
+        type: thinkingMode === "enabled" ? "enabled" : "disabled",
+      };
+      if (thinkingMode === "enabled" && hasEffort) {
+        body.reasoning_effort = thinkingEffort;
+      }
+      break;
+    case "aliyunbailian":
+      // 百炼仅支持 enable_thinking 布尔开关，不支持推理强度参数
+      body.enable_thinking = thinkingMode === "enabled";
+      break;
+    case "siliconflow":
+      body.enable_thinking = thinkingMode === "enabled";
+      if (thinkingMode === "enabled" && hasEffort) {
+        // 将抽象等级转换为硅基流动所支持的具体思考 tokens 额度
+        body.thinking_budget = siliconflowEffortMap[thinkingEffort] || 8192;
+      }
+      break;
+    case "cerebras":
+      if (thinkingMode === "disabled") {
+        body.reasoning_effort = "none";
+      } else if (hasEffort) {
+        body.reasoning_effort = thinkingEffort;
+      }
+      break;
+    case "openai":
+      if (thinkingMode === "disabled") {
+        body.reasoning_effort = "none";
+      } else if (thinkingMode === "enabled" && hasEffort) {
+        body.reasoning_effort = thinkingEffort;
+      }
+      break;
+    case "openrouter":
+      if (hasEffort) {
+        body.reasoning = { effort: thinkingEffort };
+      }
+      break;
+    default:
+      break;
+  }
 };
 
 const genGoogle = ({ texts, from, to, url, key }) => {
@@ -435,6 +621,9 @@ const genOpenAI = ({
   maxTokens,
   hisMsgs = [],
   useStream = false,
+  apiType,
+  thinkingMode,
+  thinkingEffort,
 }) => {
   const userMsg = {
     role: "user",
@@ -455,6 +644,8 @@ const genOpenAI = ({
     stream: useStream,
   };
 
+  injectThinking(body, { apiType, thinkingMode, thinkingEffort });
+
   const headers = {
     "Content-type": "application/json",
     Authorization: `Bearer ${key}`, // OpenAI
@@ -474,6 +665,8 @@ const genGemini = ({
   maxTokens,
   hisMsgs = [],
   useStream = false,
+  thinkingMode,
+  thinkingEffort,
 }) => {
   url = url
     .replaceAll(INPUT_PLACE_MODEL, model)
@@ -486,12 +679,8 @@ const genGemini = ({
   }
 
   const userMsg = { role: "user", parts: [{ text: userPrompt }] };
+
   const body = {
-    // system_instruction: {
-    //   parts: {
-    //     text: systemPrompt,
-    //   },
-    // },
     contents: [
       {
         role: "model",
@@ -503,12 +692,18 @@ const genGemini = ({
     generationConfig: {
       maxOutputTokens: maxTokens,
       temperature,
-      // topP: 0.8,
-      // topK: 10,
     },
-    // thinkingConfig: {
-    //   thinkingBudget: 0,
-    // },
+  };
+
+  if (thinkingMode === "disabled") {
+    body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  } else if (thinkingMode && thinkingMode !== "auto") {
+    if (thinkingEffort && thinkingEffort !== "_default") {
+      body.generationConfig.thinkingConfig = { thinkingLevel: thinkingEffort };
+    }
+  }
+
+  Object.assign(body, {
     safetySettings: [
       {
         category: "HARM_CATEGORY_HARASSMENT",
@@ -527,7 +722,7 @@ const genGemini = ({
         threshold: "BLOCK_NONE",
       },
     ],
-  };
+  });
   const headers = {
     "Content-type": "application/json",
     "x-goog-api-key": key,
@@ -546,6 +741,9 @@ const genGemini2 = ({
   maxTokens,
   hisMsgs = [],
   useStream = false,
+  apiType,
+  thinkingMode,
+  thinkingEffort,
 }) => {
   const userMsg = {
     role: "user",
@@ -566,6 +764,8 @@ const genGemini2 = ({
     stream: useStream,
   };
 
+  injectThinking(body, { apiType, thinkingMode, thinkingEffort });
+
   const headers = {
     "Content-type": "application/json",
     Authorization: `Bearer ${key}`,
@@ -584,6 +784,8 @@ const genClaude = ({
   maxTokens,
   hisMsgs = [],
   useStream = false,
+  thinkingMode,
+  thinkingEffort,
 }) => {
   const userMsg = {
     role: "user",
@@ -597,6 +799,15 @@ const genClaude = ({
     max_tokens: maxTokens,
     stream: useStream,
   };
+
+  if (thinkingMode && thinkingMode !== "auto") {
+    if (thinkingMode === "enabled") {
+      body.thinking = { type: "adaptive" };
+      if (thinkingEffort && thinkingEffort !== "_default") {
+        body.output_config = { effort: thinkingEffort };
+      }
+    }
+  }
 
   const headers = {
     "Content-type": "application/json",
@@ -618,6 +829,8 @@ const genOpenRouter = ({
   maxTokens,
   hisMsgs = [],
   useStream = false,
+  thinkingMode,
+  thinkingEffort,
 }) => {
   const userMsg = {
     role: "user",
@@ -637,6 +850,12 @@ const genOpenRouter = ({
     max_tokens: maxTokens,
     stream: useStream,
   };
+
+  injectThinking(body, {
+    apiType: OPT_TRANS_OPENROUTER,
+    thinkingMode,
+    thinkingEffort,
+  });
 
   const headers = {
     "Content-type": "application/json",
@@ -647,7 +866,6 @@ const genOpenRouter = ({
 };
 
 const genOllama = ({
-  // think,
   url,
   key,
   systemPrompt,
@@ -657,6 +875,8 @@ const genOllama = ({
   maxTokens,
   hisMsgs = [],
   useStream = false,
+  thinkingMode,
+  thinkingEffort,
 }) => {
   const userMsg = {
     role: "user",
@@ -674,9 +894,14 @@ const genOllama = ({
     ],
     temperature,
     max_tokens: maxTokens,
-    // think,
-    stream: useStream,
   };
+
+  injectThinking(body, {
+    apiType: OPT_TRANS_OLLAMA,
+    thinkingMode,
+    thinkingEffort,
+  });
+  body.stream = useStream;
 
   const headers = {
     "Content-type": "application/json",
@@ -743,6 +968,10 @@ const genReqFuncs = {
   [OPT_TRANS_CUSTOMIZE]: genCustom,
 };
 
+/**
+ * 构建统一的 Fetch init 对象。
+ * 对请求体和方法做健全处理。
+ */
 const genInit = ({
   url = "",
   body = null,
@@ -761,6 +990,11 @@ const genInit = ({
   if (method !== "GET" && method !== "HEAD" && body) {
     let payload = JSON.stringify(body);
     const id = body?.params?.id;
+
+    // REVIEW: 极其硬核的 WAF (网关指纹防火墙) 特征规避设计！
+    // 很多公开的 JSON-RPC 翻译网关由于序列化格式完全一致，极易被 WAF 通过报文指纹拦截阻断。
+    // 此处针对 body 中的随机 id 动态对方法字段进行了微小的空格格式抖动（在冒号前或后加入空格），
+    // 能够破坏 WAF 的静态字符串指纹匹配，达到长期稳定抗封防盾的效果。
     if (id) {
       payload = payload.replace(
         'method":"',
@@ -802,6 +1036,9 @@ export const genTransReq = async ({ reqHook, ...args }) => {
     customBody,
     events,
     tone,
+    prevContext,
+    nextContext,
+    docInfo: externalDocInfo,
   } = args;
 
   if (API_SPE_TYPES.mulkeys.has(apiType)) {
@@ -813,9 +1050,9 @@ export const genTransReq = async ({ reqHook, ...args }) => {
   }
 
   if (API_SPE_TYPES.ai.has(apiType)) {
-    const docInfo = getDocInfo();
+    const docInfo = externalDocInfo || getDocInfo();
 
-    args.systemPrompt = events
+    let baseSystemPrompt = events
       ? genSubtitlePrompt({
           subtitlePrompt,
           from,
@@ -837,8 +1074,16 @@ export const genTransReq = async ({ reqHook, ...args }) => {
           docInfo,
           tone,
         });
+
+    args.systemPrompt = baseSystemPrompt;
     args.userPrompt = events
-      ? JSON.stringify(events)
+      ? buildSubtitleUserPrompt({
+          formattedEvents: usesIndexSubtitleInput(subtitlePrompt)
+            ? formatIndexSubtitleEvents(events)
+            : events,
+          prevContext,
+          nextContext,
+        })
       : genUserPrompt({
           nobatchUserPrompt,
           useBatchFetch,
@@ -861,6 +1106,10 @@ export const genTransReq = async ({ reqHook, ...args }) => {
     userMsg = null,
     method = "POST",
   } = genReqFuncs[apiType](args);
+
+  if (events && apiType === OPT_TRANS_GEMINI && body?.generationConfig) {
+    body.generationConfig.responseMimeType = "application/json";
+  }
 
   // 合并用户自定义headers和body
   if (customHeader?.trim()) {
@@ -1027,7 +1276,7 @@ export const parseTransRes = async (
       if (history && userMsg && modelMsg) {
         history.add(userMsg, modelMsg);
       }
-      return parseAIRes(modelMsg?.parts?.[0]?.text ?? "", useBatchFetch);
+      return parseAIRes(geminiText(modelMsg?.parts), useBatchFetch);
     case OPT_TRANS_CLAUDE:
       modelMsg = { role: res?.role, content: res?.content?.text };
       if (history && userMsg && modelMsg) {
@@ -1068,6 +1317,213 @@ export const parseTransRes = async (
 };
 
 /**
+ * 从各家 AI 接口响应中抽取 AI 词典正文。
+ *
+ * AI 词典使用 Markdown 原文展示，不走翻译结果的 JSON 行解析逻辑，
+ * 因此这里只提取模型 message/content 文本并保留其格式。
+ *
+ * @param {*} res 接口原始响应
+ * @param {string} apiType API 类型
+ * @returns {string} 模型生成的 Markdown 内容
+ */
+function parseDictRes(res, apiType) {
+  switch (apiType) {
+    case OPT_TRANS_EPHONEAI:
+    case OPT_TRANS_OPENAI:
+    case OPT_TRANS_DEEPSEEK:
+    case OPT_TRANS_SILICONFLOW:
+    case OPT_TRANS_XIAOMIMIMO:
+    case OPT_TRANS_ALIYUNBAILIAN:
+    case OPT_TRANS_CEREBRAS:
+    case OPT_TRANS_ZAI:
+    case OPT_TRANS_GEMINI_2:
+    case OPT_TRANS_OPENROUTER:
+    case OPT_TRANS_OLLAMA:
+      return res?.choices?.[0]?.message?.content || "";
+    case OPT_TRANS_GEMINI:
+      return geminiText(res?.candidates?.[0]?.content?.parts);
+    case OPT_TRANS_CLAUDE:
+      return res?.content?.[0]?.text || "";
+    case OPT_TRANS_CUSTOMIZE:
+      if (typeof res === "string") return res;
+      return res?.text || res?.result || "";
+    default:
+  }
+
+  throw new Error("parse dictionary result: apiType not matched", apiType);
+}
+
+/**
+ * 发起 AI 词典请求并返回 Markdown 结果。
+ *
+ * 这里将词典提示词临时映射到非聚合翻译请求字段，
+ * 以便复用 `genTransReq` 已经实现好的鉴权、模型参数、Hook 和流式协议适配。
+ *
+ * @param {Object} params 词典请求参数
+ * @param {string} params.text 需要解析的文本
+ * @param {string} params.from 已映射到当前接口规格的源语言名称
+ * @param {string} params.to 已映射到当前接口规格的目标语言名称
+ * @param {string} params.fromLang 源语言代码
+ * @param {string} params.toLang 目标语言代码
+ * @param {Object} params.apiSetting 当前 AI 接口配置
+ * @param {Object} [params.docInfo] 页面标题、描述与摘要
+ * @param {string} [params.context] 当前选区所在段落上下文
+ * @param {Function} [params.onStreamChunk] 流式增量回调
+ * @param {AbortSignal} [params.signal] 取消信号
+ * @returns {Promise<string>} Markdown 格式的词典解析结果
+ */
+export const handleDict = async ({
+  text,
+  from,
+  to,
+  fromLang,
+  toLang,
+  apiSetting,
+  docInfo,
+  context = "",
+  onStreamChunk,
+  signal,
+}) => {
+  if (signal?.aborted) {
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
+
+  const {
+    apiType,
+    fetchInterval,
+    fetchLimit,
+    httpTimeout,
+    dictPrompt,
+    dictUserPrompt,
+  } = apiSetting;
+  const enableStream =
+    Boolean(onStreamChunk) &&
+    apiSetting.useStream &&
+    API_SPE_TYPES.stream.has(apiType);
+  if (!dictPrompt) {
+    throw new Error("AI dictionary prompt is empty.");
+  }
+
+  // 词典请求本质上是单条文本解析，强制关闭批量模式，避免进入批量 JSON 解析分支。
+  const requestApiSetting = {
+    ...apiSetting,
+    useBatchFetch: false,
+    useStream: enableStream,
+    nobatchPrompt: dictPrompt,
+    nobatchUserPrompt: dictUserPrompt ?? defaultDictUserPrompt,
+  };
+  const dictDocInfo = docInfo || getDocInfo();
+
+  // 将选区段落作为 docInfo.context 注入，使默认词典提示词中的 {{context}} 可被替换。
+  const [input, init] = await genTransReq({
+    ...requestApiSetting,
+    texts: [text],
+    from,
+    to,
+    fromLang,
+    toLang,
+    docInfo: {
+      ...(dictDocInfo || {}),
+      context,
+    },
+  });
+
+  if (enableStream) {
+    try {
+      let fullContent = "";
+
+      for await (const rawData of fetchStream(input, init, {
+        useCache: false,
+        usePool: true,
+        fetchInterval,
+        fetchLimit,
+        httpTimeout,
+        signal,
+      })) {
+        try {
+          const json = JSON.parse(rawData);
+          const delta = getStreamDelta(json, apiType);
+          if (!delta) continue;
+
+          fullContent += delta;
+          // 流式模型可能先输出 Markdown 代码围栏，边流式展示边剥离可避免 UI 闪出 ```。
+          fullContent = stripMarkdownCodeBlock(fullContent, true);
+          onStreamChunk({ markdown: fullContent });
+        } catch {
+          // 忽略单个 SSE 数据帧解析失败，等待后续帧继续输出。
+        }
+      }
+
+      const markdown = stripMarkdownCodeBlock(fullContent).trim();
+      if (!markdown) {
+        throw new Error("dictionary got empty content");
+      }
+
+      return markdown;
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        throw err;
+      }
+
+      kissLog("dictionary stream failed, fallback to non-stream", err);
+    }
+
+    // 流式协议异常时自动降级为普通请求，保留 AI 词典功能可用性。
+    const [fallbackInput, fallbackInit] = await genTransReq({
+      ...requestApiSetting,
+      useStream: false,
+      texts: [text],
+      from,
+      to,
+      fromLang,
+      toLang,
+      docInfo: {
+        ...(dictDocInfo || {}),
+        context,
+      },
+    });
+
+    const fallbackRes = await fetchData(fallbackInput, fallbackInit, {
+      useCache: false,
+      usePool: true,
+      fetchInterval,
+      fetchLimit,
+      httpTimeout,
+      signal,
+    });
+    if (!fallbackRes) {
+      throw new Error("dictionary got empty response");
+    }
+
+    const fallbackMarkdown = parseDictRes(fallbackRes, apiType);
+    if (!fallbackMarkdown) {
+      throw new Error("dictionary got empty content");
+    }
+
+    return fallbackMarkdown;
+  }
+
+  const res = await fetchData(input, init, {
+    useCache: false,
+    usePool: true,
+    fetchInterval,
+    fetchLimit,
+    httpTimeout,
+    signal,
+  });
+  if (!res) {
+    throw new Error("dictionary got empty response");
+  }
+
+  const markdown = parseDictRes(res, apiType);
+  if (!markdown) {
+    throw new Error("dictionary got empty content");
+  }
+
+  return markdown;
+};
+
+/**
  * 发送翻译请求并解析
  * 支持流式和非流式两种模式
  * @param {*} texts 待翻译文本数组
@@ -1077,8 +1533,21 @@ export const parseTransRes = async (
  */
 export async function* handleTranslate(
   texts = [],
-  { from, to, fromLang, toLang, langMap, glossary, apiSetting, usePool }
+  {
+    from,
+    to,
+    fromLang,
+    toLang,
+    langMap,
+    glossary,
+    apiSetting,
+    usePool,
+    docInfo,
+    signal,
+  }
 ) {
+  if (signal?.aborted) return;
+
   let history = null;
   let hisMsgs = [];
   const {
@@ -1106,37 +1575,30 @@ export async function* handleTranslate(
     }
   }
 
-  const [input, init, userMsg] = await genTransReq({
-    texts,
-    from,
-    to,
-    fromLang,
-    toLang,
-    langMap,
-    glossary,
-    hisMsgs,
-    token,
-    useStream: enableStream,
-    ...apiSetting,
-  });
-
-  if (enableStream) {
-    yield* handleTranslateStreamInternal(texts, input, init, {
-      apiType,
-      history,
-      userMsg,
-      usePool,
-      fetchInterval,
-      fetchLimit,
-      httpTimeout,
+  const getRequest = (requestUseStream) =>
+    genTransReq({
+      ...apiSetting,
+      texts,
+      from,
+      to,
+      fromLang,
+      toLang,
+      langMap,
+      glossary,
+      hisMsgs,
+      token,
+      useStream: requestUseStream,
+      docInfo,
     });
-  } else {
+
+  const runNonStream = async function* (input, init, userMsg) {
     const response = await fetchData(input, init, {
       useCache: false,
       usePool,
       fetchInterval,
       fetchLimit,
       httpTimeout,
+      signal,
     });
     if (!response) {
       throw new Error("translate got empty response");
@@ -1160,7 +1622,39 @@ export async function* handleTranslate(
     for (let i = 0; i < result.length; i++) {
       yield { id: i, result: result[i] };
     }
+  };
+
+  const [input, init, userMsg] = await getRequest(enableStream);
+
+  if (enableStream) {
+    try {
+      yield* handleTranslateStreamInternal(texts, input, init, {
+        apiType,
+        history,
+        userMsg,
+        useBatchFetch: apiSetting.useBatchFetch,
+        usePool,
+        fetchInterval,
+        fetchLimit,
+        httpTimeout,
+        signal,
+        streamRenderMode: apiSetting.streamRenderMode || "disabled",
+      });
+      return;
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        throw err;
+      }
+      kissLog("translate stream failed, fallback to non-stream", err);
+    }
+
+    const [fallbackInput, fallbackInit, fallbackUserMsg] =
+      await getRequest(false);
+    yield* runNonStream(fallbackInput, fallbackInit, fallbackUserMsg);
+    return;
   }
+
+  yield* runNonStream(input, init, userMsg);
 }
 
 /**
@@ -1170,13 +1664,26 @@ async function* handleTranslateStreamInternal(
   texts,
   input,
   init,
-  { apiType, history, userMsg, usePool, fetchInterval, fetchLimit, httpTimeout }
+  {
+    apiType,
+    history,
+    userMsg,
+    useBatchFetch,
+    usePool,
+    fetchInterval,
+    fetchLimit,
+    httpTimeout,
+    signal,
+    streamRenderMode,
+  }
 ) {
   const results = new Array(texts.length).fill(null);
   let fullContent = "";
   const processedIds = new Set();
 
   const jsonParser = createStreamingJsonParser();
+  const realtimeParser =
+    streamRenderMode === "realtime" ? createRealtimeStreamParser() : null;
   let isJsonFormat = false;
   let formatDetected = false;
 
@@ -1187,6 +1694,7 @@ async function* handleTranslateStreamInternal(
       fetchInterval,
       fetchLimit,
       httpTimeout,
+      signal,
     })) {
       try {
         const json = JSON.parse(rawData);
@@ -1195,6 +1703,13 @@ async function* handleTranslateStreamInternal(
         if (delta) {
           fullContent += delta;
           fullContent = stripMarkdownCodeBlock(fullContent, true);
+
+          if (!useBatchFetch) {
+            if (streamRenderMode === "realtime") {
+              yield { id: 0, partialText: fullContent, isComplete: false };
+            }
+            continue;
+          }
 
           if (!formatDetected) {
             const { isJson, detected } = detectStreamFormat(fullContent);
@@ -1225,6 +1740,15 @@ async function* handleTranslateStreamInternal(
               yield { id, result: translation };
             }
           }
+          // 实时渲染模式：yield 段落级中间态
+          if (realtimeParser && streamRenderMode === "realtime") {
+            const items = realtimeParser.write(delta);
+            for (const { id, partialText, isComplete } of items) {
+              if (!isComplete) {
+                yield { id, partialText, isComplete: false };
+              }
+            }
+          }
         }
       } catch (e) {
         // 忽略解析错误
@@ -1242,7 +1766,7 @@ async function* handleTranslateStreamInternal(
   // 最终再解析一次，捕获可能遗漏的段落
   const hasEmpty = results.some((r) => !r);
   if (hasEmpty) {
-    const parsed = parseAIRes(fullContent, true);
+    const parsed = parseAIRes(fullContent, useBatchFetch);
     for (let i = 0; i < texts.length && i < parsed.length; i++) {
       if (!results[i]) {
         results[i] = parsed[i];
@@ -1296,18 +1820,284 @@ export const handleMicrosoftLangdetect = async (texts = []) => {
 };
 
 /**
- * 字幕翻译
- * @param {*} param0
- * @returns
+ * 执行字幕断句与字幕翻译请求。
+ *
+ * @param {Object} params 字幕请求参数。
+ * @param {Array<Object>} params.events 当前字幕分块内的原始事件列表。
+ * @param {string} params.from 源语言代码。
+ * @param {string} params.to 目标语言代码。
+ * @param {Object} params.apiSetting 字幕断句所使用的 API 配置。
+ * @param {Object} [params.docInfo] 页面标题、描述和 AI 摘要等上下文。
+ * @param {string} [params.prevContext] 前一个字幕分块的只读上下文。
+ * @param {string} [params.nextContext] 后一个字幕分块的只读上下文。
+ * @param {Function} [params.onSubtitleChunk] 流式解析到完整字幕句子时触发的回调。
+ * @param {AbortSignal} [params.signal] 调用方生命周期取消信号，会下传到 fetch/fetchStream。
+ * @returns {Promise<Array<Object>>} 完整字幕句子数组。
  */
-export const handleSubtitle = async ({ events, from, to, apiSetting }) => {
-  const { apiType, fetchInterval, fetchLimit, httpTimeout } = apiSetting;
+export const handleSubtitle = async ({
+  events,
+  from,
+  to,
+  apiSetting,
+  docInfo,
+  prevContext = "",
+  nextContext = "",
+  onSubtitleChunk,
+  signal,
+}) => {
+  const { apiType, fetchInterval, fetchLimit, httpTimeout, useStream } =
+    apiSetting;
+  const enableStream =
+    Boolean(onSubtitleChunk) && useStream && API_SPE_TYPES.stream.has(apiType);
 
   const [input, init] = await genTransReq({
     ...apiSetting,
+    // 字幕流式只在调用方显式消费句子分块时开启，避免普通完整响应路径误把 SSE 当 JSON 解析。
+    useStream: enableStream,
     events,
     from,
     to,
+    docInfo,
+    prevContext,
+    nextContext,
+  });
+
+  if (enableStream) {
+    try {
+      const subtitles = await handleSubtitleStreamInternal(input, init, {
+        events,
+        apiType,
+        fetchInterval,
+        fetchLimit,
+        httpTimeout,
+        onSubtitleChunk,
+        signal,
+      });
+      if (subtitles?.length) {
+        return subtitles;
+      }
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        throw err;
+      }
+      kissLog("subtitle stream failed, fallback to non-stream", err);
+    }
+
+    return handleSubtitle({
+      events,
+      from,
+      to,
+      apiSetting: { ...apiSetting, useStream: false },
+      docInfo,
+      prevContext,
+      nextContext,
+      signal,
+    });
+  }
+
+  const res = await fetchData(input, init, {
+    useCache: false,
+    usePool: true,
+    fetchInterval,
+    fetchLimit,
+    httpTimeout,
+    signal,
+  });
+  if (!res) {
+    kissLog("subtitle got empty response");
+    return [];
+  }
+
+  switch (apiType) {
+    case OPT_TRANS_EPHONEAI:
+    case OPT_TRANS_OPENAI:
+    case OPT_TRANS_DEEPSEEK:
+    case OPT_TRANS_SILICONFLOW:
+    case OPT_TRANS_XIAOMIMIMO:
+    case OPT_TRANS_ALIYUNBAILIAN:
+    case OPT_TRANS_CEREBRAS:
+    case OPT_TRANS_ZAI:
+    case OPT_TRANS_GEMINI_2:
+    case OPT_TRANS_OPENROUTER:
+    case OPT_TRANS_OLLAMA:
+      return parseSTRes(res?.choices?.[0]?.message?.content ?? "", events);
+    case OPT_TRANS_GEMINI: {
+      const candidate = res?.candidates?.[0];
+      const { thinkingMode } = apiSetting;
+      const thinkingWasOn =
+        thinkingMode && thinkingMode !== "auto" && thinkingMode !== "disabled";
+
+      // REVIEW: 本地 AI (Gemini Nano) 强大的降级容灾容错逻辑！
+      // 字幕翻译时，如果开启了推理链 (Thinking)，可能会因推理产生大量额外 Token，
+      // 触发 Gemini 发生 finishReason === "MAX_TOKENS" 的阶段性提前截断中止。
+      // 遇到该截断限制时，此处自动关闭推理（thinkingMode = "disabled"）并重新发送重试，
+      // 降级以取得无损字幕。该设计能够极大增强在复杂字幕网页下的长句稳定性。
+      if (candidate?.finishReason === "MAX_TOKENS" && thinkingWasOn) {
+        const [retryInput, retryInit] = await genTransReq({
+          ...apiSetting,
+          // Gemini 字幕重试同样需要完整 JSON/VTT 结果，避免把 SSE 当普通响应解析。
+          useStream: false,
+          thinkingMode: "disabled",
+          events,
+          from,
+          to,
+          docInfo,
+          prevContext,
+          nextContext,
+        });
+        const retryRes = await fetchData(retryInput, retryInit, {
+          useCache: false,
+          usePool: true,
+          fetchInterval,
+          fetchLimit,
+          httpTimeout,
+        });
+        if (retryRes?.candidates?.[0]?.content?.parts) {
+          return parseSTRes(
+            geminiText(retryRes.candidates[0].content.parts),
+            events
+          );
+        }
+      }
+      return parseSTRes(geminiText(candidate?.content?.parts), events);
+    }
+    case OPT_TRANS_CLAUDE:
+      return parseSTRes(res?.content?.[0]?.text ?? "", events);
+    case OPT_TRANS_CUSTOMIZE:
+      return res;
+    default:
+  }
+
+  return [];
+};
+
+/**
+ * 处理字幕断句的 SSE 流式响应。
+ *
+ * @param {string} input 请求地址。
+ * @param {Object} init Fetch 初始化参数。
+ * @param {Object} options 流式解析上下文。
+ * @param {Array<Object>} options.events 当前字幕事件列表，用于把 s/e 索引映射回时间轴。
+ * @param {string} options.apiType 翻译接口类型。
+ * @param {number} options.fetchInterval 请求池间隔。
+ * @param {number} options.fetchLimit 请求池并发限制。
+ * @param {number} options.httpTimeout 请求超时时间。
+ * @param {Function} options.onSubtitleChunk 新句子完成时触发的回调。
+ * @param {AbortSignal} options.signal 取消信号。
+ * @returns {Promise<Array<Object>>} 最终完整字幕数组。
+ */
+async function handleSubtitleStreamInternal(
+  input,
+  init,
+  {
+    events,
+    apiType,
+    fetchInterval,
+    fetchLimit,
+    httpTimeout,
+    onSubtitleChunk,
+    signal,
+  }
+) {
+  const parser = createStreamingSubtitleParser(events);
+  let fullContent = "";
+  const emitted = [];
+  const emittedKeys = new Set();
+
+  const appendSubtitles = (subtitles, isFinal = false) => {
+    const fresh = [];
+    for (const subtitle of subtitles || []) {
+      const key = `${subtitle._si}:${subtitle._ei}`;
+      if (emittedKeys.has(key)) continue;
+      emittedKeys.add(key);
+      emitted.push(subtitle);
+      fresh.push(subtitle);
+    }
+
+    if (fresh.length) {
+      // 只有完整句子对象闭合后才上抛，避免半句字幕污染播放器时间轴。
+      onSubtitleChunk({ subtitles: fresh, isFinal });
+    }
+  };
+
+  for await (const rawData of fetchStream(input, init, {
+    useCache: false,
+    usePool: true,
+    fetchInterval,
+    fetchLimit,
+    httpTimeout,
+    signal,
+  })) {
+    if (signal?.aborted) {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    }
+
+    try {
+      const json = JSON.parse(rawData);
+      const delta = getStreamDelta(json, apiType);
+      if (!delta) continue;
+
+      fullContent += delta;
+      appendSubtitles(parser.write(delta), false);
+    } catch {
+      // 单个 SSE 分片异常不终止整条字幕流，等待后续分片或最终兜底解析补齐。
+    }
+  }
+
+  appendSubtitles(parser.end(), false);
+
+  const finalSubtitles = parseSTRes(fullContent, events);
+  appendSubtitles(finalSubtitles, true);
+
+  return finalSubtitles?.length
+    ? finalSubtitles
+    : emitted.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * 上下文摘要
+ * @param {*} param0
+ * @returns
+ */
+const summarizeSystemPrompt = `Analyze the video title, description, and transcript below. Produce a concise briefing (max 300 words) to help a subtitle translator understand the content accurately.
+
+Cover these aspects:
+1. Main topic, themes, and subject domain
+2. Key terminology with brief definitions or context
+3. Important proper nouns (people, organizations, products, places)
+4. Speaker's tone and register
+5. Abbreviations, jargon, or ambiguous terms needing consistent handling
+
+Output plain text only. No markdown, no formatting, no headers.`;
+
+export const handleSummarize = async ({
+  title,
+  description,
+  transcript,
+  apiSetting,
+}) => {
+  const { apiType, fetchInterval, fetchLimit, httpTimeout } = apiSetting;
+
+  const userPrompt = [
+    title && `Title: ${title}`,
+    description && `Description: ${description}`,
+    `\nTranscript:\n${transcript}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const [input, init] = await genTransReq({
+    ...apiSetting,
+    // 字幕上下文总结需要一次性文本结果，不能继承段落翻译的流式输出设置。
+    useStream: false,
+    texts: [""],
+    from: "auto",
+    to: "en",
+    fromLang: "auto",
+    toLang: "en",
+    useBatchFetch: false,
+    nobatchPrompt: summarizeSystemPrompt,
+    nobatchUserPrompt: userPrompt,
   });
 
   const res = await fetchData(input, init, {
@@ -1317,25 +2107,35 @@ export const handleSubtitle = async ({ events, from, to, apiSetting }) => {
     fetchLimit,
     httpTimeout,
   });
-  if (!res) {
-    kissLog("subtitle got empty response");
-    return [];
-  }
+
+  if (!res) return "";
 
   switch (apiType) {
+    case OPT_TRANS_EPHONEAI:
     case OPT_TRANS_OPENAI:
+    case OPT_TRANS_DEEPSEEK:
+    case OPT_TRANS_SILICONFLOW:
+    case OPT_TRANS_XIAOMIMIMO:
+    case OPT_TRANS_ALIYUNBAILIAN:
+    case OPT_TRANS_CEREBRAS:
+    case OPT_TRANS_ZAI:
     case OPT_TRANS_GEMINI_2:
     case OPT_TRANS_OPENROUTER:
     case OPT_TRANS_OLLAMA:
-      return parseSTRes(res?.choices?.[0]?.message?.content ?? "");
+      return res?.choices?.[0]?.message?.content?.trim() || "";
     case OPT_TRANS_GEMINI:
-      return parseSTRes(res?.candidates?.[0]?.content?.parts?.[0]?.text ?? "");
+      return geminiText(res?.candidates?.[0]?.content?.parts).trim() || "";
     case OPT_TRANS_CLAUDE:
-      return parseSTRes(res?.content?.[0]?.text ?? "");
+      return res?.content?.[0]?.text?.trim() || "";
     case OPT_TRANS_CUSTOMIZE:
-      return res;
+      if (typeof res === "string") return res.trim();
+      return (
+        res?.choices?.[0]?.message?.content?.trim() ||
+        geminiText(res?.candidates?.[0]?.content?.parts).trim() ||
+        res?.content?.[0]?.text?.trim() ||
+        ""
+      );
     default:
+      return "";
   }
-
-  return [];
 };

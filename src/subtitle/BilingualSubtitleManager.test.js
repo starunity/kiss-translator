@@ -1,0 +1,314 @@
+import { BilingualSubtitleManager } from "./BilingualSubtitleManager";
+import { apiTranslate } from "../apis/index.js";
+
+jest.mock("../apis/index.js", () => ({
+  apiTranslate: jest.fn(),
+  apiMicrosoftDict: jest.fn(),
+}));
+
+jest.mock("../libs/log.js", () => ({
+  LogLevel: {
+    INFO: { value: "info" },
+  },
+  logger: {
+    info: jest.fn(),
+    warn: jest.fn(),
+  },
+}));
+
+/**
+ * 创建一个可由测试主动 resolve/reject 的 Promise。
+ *
+ * @returns {{promise: Promise<unknown>, resolve: Function, reject: Function}} 可控 Promise。
+ */
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+
+  return { promise, resolve, reject };
+}
+
+/**
+ * 构造 YouTube 播放器附近的最小 DOM 结构。
+ *
+ * @returns {HTMLVideoElement} 测试用 video 节点。
+ */
+function createVideoElement() {
+  document.body.innerHTML = "";
+  const outer = document.createElement("div");
+  outer.className = "html5-video-player ytp-autohide";
+  const inner = document.createElement("div");
+  const video = document.createElement("video");
+
+  Object.defineProperty(video, "currentTime", {
+    value: 0,
+    writable: true,
+  });
+
+  inner.appendChild(video);
+  outer.appendChild(inner);
+  document.body.appendChild(outer);
+  return video;
+}
+
+const subtitle = {
+  start: 0,
+  end: 1000,
+  text: "hello world",
+  translation: "",
+};
+
+const setting = {
+  fromLang: "en",
+  toLang: "zh-CN",
+  apiSetting: {
+    apiSlug: "openai",
+    apiType: "OpenAI",
+    useStream: true,
+  },
+  docInfo: {},
+  preTrans: 90,
+  throttleTrans: 0,
+  windowStyle: "",
+  originStyle: "",
+  translationStyle: "",
+  isBilingual: true,
+  blurTranslation: false,
+  hoverLookupMode: "off",
+  enhanceMode: "off",
+};
+
+function getCaptionLines() {
+  return Array.from(document.querySelectorAll(".kiss-caption-window p")).map(
+    (node) => node.textContent
+  );
+}
+
+describe("BilingualSubtitleManager", () => {
+  beforeEach(() => {
+    apiTranslate.mockReset();
+  });
+
+  test("renders original subtitle before translation by default", () => {
+    const videoEl = createVideoElement();
+    const manager = new BilingualSubtitleManager({
+      videoEl,
+      formattedSubtitles: [{ ...subtitle, translation: "你好世界" }],
+      setting,
+    });
+
+    manager.start();
+
+    expect(getCaptionLines()).toEqual(["hello world", "你好世界"]);
+    manager.destroy();
+  });
+
+  test("renders translation before original when display order is translation first", () => {
+    const videoEl = createVideoElement();
+    const manager = new BilingualSubtitleManager({
+      videoEl,
+      formattedSubtitles: [{ ...subtitle, translation: "你好世界" }],
+      setting: { ...setting, displayOrder: "translation-first" },
+    });
+
+    manager.start();
+
+    expect(getCaptionLines()).toEqual(["你好世界", "hello world"]);
+    manager.destroy();
+  });
+
+  test("renders only translation when bilingual display is disabled", () => {
+    const videoEl = createVideoElement();
+    const manager = new BilingualSubtitleManager({
+      videoEl,
+      formattedSubtitles: [{ ...subtitle, translation: "你好世界" }],
+      setting: {
+        ...setting,
+        isBilingual: false,
+        displayOrder: "translation-first",
+      },
+    });
+
+    manager.start();
+
+    expect(getCaptionLines()).toEqual(["你好世界"]);
+    manager.destroy();
+  });
+
+  test("updates current subtitle and list callback with streaming translation chunk", async () => {
+    const deferred = createDeferred();
+    apiTranslate.mockImplementation(({ onStreamChunk }) => {
+      // 单句翻译流式 chunk 到达时，应立即刷新当前字幕和侧边栏更新事件。
+      onStreamChunk({ text: "部分译文", isComplete: false });
+      return deferred.promise;
+    });
+
+    const videoEl = createVideoElement();
+    const manager = new BilingualSubtitleManager({
+      videoEl,
+      formattedSubtitles: [{ ...subtitle }],
+      setting,
+    });
+    manager.onSubtitleUpdate = jest.fn();
+
+    manager.start();
+    await Promise.resolve();
+
+    expect(
+      document.querySelector(".kiss-caption-window").textContent
+    ).toContain("部分译文");
+    expect(manager.onSubtitleUpdate).toHaveBeenCalledWith({
+      start: 0,
+      end: 1000,
+      text: "hello world",
+      translation: "部分译文",
+    });
+
+    deferred.resolve({ trText: "最终译文" });
+    await deferred.promise;
+    await Promise.resolve();
+
+    expect(
+      document.querySelector(".kiss-caption-window").textContent
+    ).toContain("最终译文");
+
+    manager.destroy();
+  });
+
+  test("repairs failed chunk translations immediately", async () => {
+    const deferred = createDeferred();
+    apiTranslate.mockReturnValue(deferred.promise);
+
+    const videoEl = createVideoElement();
+    const failedSubtitle = {
+      ...subtitle,
+      translation: "[Translation failed]",
+    };
+    const manager = new BilingualSubtitleManager({
+      videoEl,
+      formattedSubtitles: [failedSubtitle],
+      setting,
+    });
+
+    manager.repairChunkTranslations([failedSubtitle]);
+
+    expect(apiTranslate).toHaveBeenCalledTimes(1);
+    expect(apiTranslate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "hello world",
+        fromLang: "en",
+        toLang: "zh-CN",
+        apiSetting: expect.objectContaining(setting.apiSetting),
+      })
+    );
+
+    deferred.resolve({ trText: "修复译文" });
+    await deferred.promise;
+    manager.destroy();
+  });
+
+  test("does not repair untranslated chunk subtitles immediately", () => {
+    const videoEl = createVideoElement();
+    const untranslatedSubtitle = {
+      ...subtitle,
+      translation: "",
+    };
+    const missingTranslationSubtitle = {
+      start: 1000,
+      end: 2000,
+      text: "missing translation",
+    };
+    const draftSubtitle = {
+      ...subtitle,
+      start: 2000,
+      end: 3000,
+      translation: "draft translation",
+      _isDraftTranslation: true,
+    };
+    const manager = new BilingualSubtitleManager({
+      videoEl,
+      formattedSubtitles: [
+        untranslatedSubtitle,
+        missingTranslationSubtitle,
+        draftSubtitle,
+      ],
+      setting,
+    });
+
+    manager.repairChunkTranslations([
+      untranslatedSubtitle,
+      missingTranslationSubtitle,
+      draftSubtitle,
+    ]);
+
+    expect(apiTranslate).not.toHaveBeenCalled();
+    manager.destroy();
+  });
+
+  test("streams repaired chunk translations to caption and list callback", async () => {
+    const deferred = createDeferred();
+    apiTranslate.mockImplementation(({ onStreamChunk }) => {
+      onStreamChunk({ text: "补翻中", isComplete: false });
+      return deferred.promise;
+    });
+
+    const videoEl = createVideoElement();
+    const failedSubtitle = {
+      ...subtitle,
+      translation: "[Translation failed]",
+    };
+    const manager = new BilingualSubtitleManager({
+      videoEl,
+      formattedSubtitles: [failedSubtitle],
+      setting,
+    });
+    manager.onSubtitleUpdate = jest.fn();
+
+    manager.start();
+    manager.repairChunkTranslations([failedSubtitle]);
+    await Promise.resolve();
+
+    expect(
+      document.querySelector(".kiss-caption-window").textContent
+    ).toContain("补翻中");
+    expect(manager.onSubtitleUpdate).toHaveBeenCalledWith({
+      start: 0,
+      end: 1000,
+      text: "hello world",
+      translation: "补翻中",
+    });
+
+    deferred.resolve({ trText: "补翻完成" });
+    await deferred.promise;
+    await Promise.resolve();
+
+    expect(
+      document.querySelector(".kiss-caption-window").textContent
+    ).toContain("补翻完成");
+
+    manager.destroy();
+  });
+
+  test("skips chunk subtitles that are already translating", () => {
+    const videoEl = createVideoElement();
+    const translatingSubtitle = {
+      ...subtitle,
+      translation: "[Translation failed]",
+      isTranslating: true,
+    };
+    const manager = new BilingualSubtitleManager({
+      videoEl,
+      formattedSubtitles: [translatingSubtitle],
+      setting,
+    });
+
+    manager.repairChunkTranslations([translatingSubtitle]);
+
+    expect(apiTranslate).not.toHaveBeenCalled();
+    manager.destroy();
+  });
+});

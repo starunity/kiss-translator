@@ -16,19 +16,22 @@ import { injectInlineJs } from "./libs/injector";
 import TranslatorManager from "./libs/translatorManager";
 
 /**
- * 油猴脚本设置页面
+ * 油猴脚本特权桥接设置。
+ * 当用户在浏览器中打开插件设置页时（打包后的 options.html 或是 dev 调试页面），
+ * 该函数负责把油猴特权 GM 接口暴露给页面环境，以便设置页面能直接读写油猴配置项。
  */
 function runSettingPage() {
-  if (GM.info?.script?.grant?.includes("unsafeWindow")) {
+  // 若油猴实际提供了 unsafeWindow (直通宿主 window 权限)，则直接挂载
+  if (hasUnsafeWindowBridge()) {
     unsafeWindow.GM = GM;
     unsafeWindow.APP_INFO = {
       name: process.env.REACT_APP_NAME,
       version: process.env.REACT_APP_VERSION,
     };
   } else {
+    // 否则，回退到注册 CustomEvent 监听器进行间接通信代理
     const ping = genEventName();
     window.addEventListener(ping, handlePing);
-    // window.eval(`(${injectScript})("${ping}")`); // eslint-disable-line
     injectInlineJs(
       `(${injectScript})("${ping}")`,
       "kiss-translator-options-injector"
@@ -36,9 +39,33 @@ function runSettingPage() {
   }
 }
 
+function hasUnsafeWindowBridge() {
+  return typeof unsafeWindow !== "undefined";
+}
+
 /**
- * 显示错误信息到页面顶部
- * @param {*} message
+ * 建立旧式 GM_* API 到现代 GM 对象的兼容垫片。
+ * 必须在任何 storage 访问前执行，避免旧油猴环境在数据迁移阶段缺少 GM。
+ */
+function ensureUserscriptGM() {
+  globalThis.GM = globalThis.GM || {};
+
+  globalThis.GM.xmlHttpRequest =
+    globalThis.GM.xmlHttpRequest || globalThis.GM_xmlhttpRequest;
+  globalThis.GM.registerMenuCommand =
+    globalThis.GM.registerMenuCommand || globalThis.GM_registerMenuCommand;
+  globalThis.GM.unregisterMenuCommand =
+    globalThis.GM.unregisterMenuCommand || globalThis.GM_unregisterMenuCommand;
+  globalThis.GM.setValue = globalThis.GM.setValue || globalThis.GM_setValue;
+  globalThis.GM.getValue = globalThis.GM.getValue || globalThis.GM_getValue;
+  globalThis.GM.deleteValue =
+    globalThis.GM.deleteValue || globalThis.GM_deleteValue;
+  globalThis.GM.info = globalThis.GM.info || globalThis.GM_info;
+}
+
+/**
+ * 在页面顶部弹出一个悬浮的红色错误提示 Banner 框，持续 10 秒后自动淡出。
+ * @param {string} message 错误内容信息
  */
 function showErr(message) {
   const bannerId = "KISS-Translator-Message";
@@ -50,6 +77,7 @@ function showErr(message) {
   const banner = document.createElement("div");
   banner.id = bannerId;
 
+  // 设置 Banner 绝对定位和高 z-index，保证提示在前台可见
   Object.assign(banner.style, {
     position: "fixed",
     top: "0",
@@ -84,6 +112,7 @@ function showErr(message) {
 
   document.body.appendChild(banner);
 
+  // 渐隐淡出效果
   const removeBanner = () => {
     banner.style.transition = "opacity 0.5s ease";
     banner.style.opacity = "0";
@@ -95,9 +124,14 @@ function showErr(message) {
   };
 
   closeButton.onclick = removeBanner;
-  setTimeout(removeBanner, 10000);
+  setTimeout(removeBanner, 10000); // 10秒后自动消失
 }
 
+/**
+ * 依据匹配规则，获取用户生词本中的所有单词用于高亮显示。
+ * @param {Object} rule 当前页面的翻译匹配规则
+ * @returns {Promise<Array<string>>} 生词本里的单词数组
+ */
 async function getFavWords(rule) {
   if (
     rule.highlightWords &&
@@ -113,20 +147,90 @@ async function getFavWords(rule) {
   return [];
 }
 
+const IFRAME_TEXT_CHECK_TIMEOUT = 1000;
+const IFRAME_TEXT_IGNORE_SELECTOR = [
+  "script",
+  "style",
+  "template",
+  "noscript",
+  "svg",
+  "canvas",
+  "iframe",
+  "input",
+  "textarea",
+  "select",
+  "option",
+  ".notranslate",
+  "[translate='no']",
+  "[contenteditable='true']",
+].join(", ");
+
+function waitForDocumentReady(timeout = IFRAME_TEXT_CHECK_TIMEOUT) {
+  if (document.readyState !== "loading") {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      document.removeEventListener("DOMContentLoaded", done);
+      resolve();
+    };
+    const timer = setTimeout(done, timeout);
+    document.addEventListener("DOMContentLoaded", done, { once: true });
+  });
+}
+
+function hasIframeTranslatableText() {
+  if (!document.body) return false;
+
+  const walker = document.createTreeWalker(
+    document.body,
+    NodeFilter.SHOW_TEXT,
+    {
+      acceptNode(node) {
+        if (!node.nodeValue?.trim()) {
+          return NodeFilter.FILTER_REJECT;
+        }
+
+        if (node.parentElement?.closest(IFRAME_TEXT_IGNORE_SELECTOR)) {
+          return NodeFilter.FILTER_REJECT;
+        }
+
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    }
+  );
+
+  return Boolean(walker.nextNode());
+}
+
+async function waitForIframeTranslatableText() {
+  await waitForDocumentReady();
+  return hasIframeTranslatableText();
+}
+
 /**
- * 入口函数
+ * 前端翻译器的核心运行总入口。
+ * @param {boolean} isUserscript 是否作为油猴 Userscript 脚本模式运行 (false 代表作为浏览器 Extension 运行)
  */
 export async function run(isUserscript = false) {
   try {
-    // 读取设置信息
+    if (isUserscript) {
+      ensureUserscriptGM();
+
+      // 0. 执行核心数据迁移 (针对油猴等无后台更新事件的场景)
+      const { runDataMigration } = await import("./libs/storage");
+      await runDataMigration();
+    }
+
+    // 1. 加载本地设置
     const setting = await getSettingWithDefault();
 
-    // 日志
+    // 2. 初始化全局日志配置
     logger.setLevel(setting.logLevel);
 
-    // if (document?.documentElement?.tagName?.toUpperCase() !== "HTML") {
-    //   return;
-    // }
+    // 3. 页面类型拦截：若是 PDF / 图片 / 音视频等非 HTML 或纯文本媒体页面，则终止执行，避免注入多余 DOM
     const contentType = document?.contentType?.toLowerCase() || "";
     if (!contentType.includes("text") && !contentType.includes("html")) {
       logger.info("Skip running in document content type: ", contentType);
@@ -135,21 +239,9 @@ export async function run(isUserscript = false) {
 
     const href = document?.location?.href || "";
 
-    // 油猴脚本
+    // 4. 若为油猴脚本环境，建立向后兼容的 GM 特权接口垫片
     if (isUserscript) {
-      if (!globalThis.GM) {
-        globalThis.GM = {
-          xmlHttpRequest: globalThis.GM_xmlhttpRequest,
-          registerMenuCommand: globalThis.GM_registerMenuCommand,
-          unregisterMenuCommand: globalThis.GM_unregisterMenuCommand,
-          setValue: globalThis.GM_setValue,
-          getValue: globalThis.GM_getValue,
-          deleteValue: globalThis.GM_deleteValue,
-          info: globalThis.GM_info,
-        };
-      }
-
-      // 设置页面
+      // 如果当前是设置面板 URL，跳转去执行设置面板专用代理
       if (
         href.includes(process.env.REACT_APP_OPTIONSPAGE_DEV) ||
         href.includes(process.env.REACT_APP_OPTIONSPAGE)
@@ -159,30 +251,35 @@ export async function run(isUserscript = false) {
       }
     }
 
-    // 黑名单
+    // 5. 网页黑名单校验，命中时彻底不启动翻译
     if (isInBlacklist(href, setting.blacklist)) {
       return;
     }
 
-    // 划词翻译黑名单
+    // 5.1. iframe 空内容拦截：默认允许 iframe 翻译，但空 iframe 不继续挂载后续脚本
+    if (isIframe && !(await waitForIframeTranslatableText())) {
+      return;
+    }
+
+    // 6. 细粒度划词/输入框/鼠标悬停组件的专属黑名单拦截，若命中则单独禁用该交互组件
     if (isInBlacklist(href, setting.tranboxSetting?.blacklist)) {
       setting.tranboxSetting.transOpen = false;
     }
 
-    // 输入框翻译黑名单
     if (isInBlacklist(href, setting.inputRule?.blacklist)) {
       setting.inputRule.transOpen = false;
     }
 
-    // 鼠标悬停翻译黑名单
     if (isInBlacklist(href, setting.mouseHoverSetting?.blacklist)) {
       setting.mouseHoverSetting.useMouseHover = false;
     }
 
-    // 翻译网页
+    // 7. 匹配当前网页专用的规则 (三级规则合并：个人 > 订阅 > 内置全局)
     const rule = await matchRule(href, setting);
     const favWords = await getFavWords(rule);
     const fabConfig = await getFabWithDefault();
+
+    // 8. 创建翻译调度器管理器并启动
     const translatorManager = new TranslatorManager({
       setting,
       rule,
@@ -193,18 +290,20 @@ export async function run(isUserscript = false) {
     });
     translatorManager.start();
 
+    // 9. 若当前页面是嵌套的 iframe，不进行视频字幕翻译，避免多个 iframe 里重复跑字幕服务造成冲突
     if (isIframe) {
       return;
     }
 
-    // 字幕翻译
+    // 10. 启动视频字幕翻译子模块 (仅在顶级 frame 下运行)
     runSubtitle({ href, setting, rule, isUserscript });
 
+    // 11. 在油猴环境下，每次进入顶级页面时尝试触发一次订阅规则的自动同步检查 (每日一次)
     if (isUserscript) {
       trySyncAllSubRules(setting);
     }
   } catch (err) {
     console.error("[KISS-Translator]", err);
-    showErr(err.message);
+    showErr(err.message); // 向前台页面绘制报错 Banner，便于用户感知与排查问题
   }
 }
